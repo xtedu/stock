@@ -111,7 +111,7 @@ CREATE TABLE safety_zones (
     UNIQUE(code, calc_date)
 );
 
--- 提醒规则与记录
+-- 提醒规则与记录,测试
 CREATE TABLE alert_rules (
     id         SERIAL PRIMARY KEY,
     user_id    INTEGER,
