@@ -1,0 +1,39 @@
+# ---- 环境与密钥 ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 前端构建产物 ----
+node_modules/
+dist/
+.vite/
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- 数据库临时文件 ----
+*.db
+*.sqlite3
+pgdata/
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
