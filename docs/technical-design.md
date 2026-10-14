@@ -23,7 +23,7 @@
 | 任务调度 | APScheduler（单机够用）；后续可升级 Celery | 每日收盘后批量计算、盘中定时轮询 |
 | 大模型 | OpenAI 兼容接口（DeepSeek / 通义 / GPT 均可，仅改配置） | 走 `openai` SDK + `base_url` 切换 |
 | 前端（H5） | Vue 3 + Vite + Vant 4 + ECharts | 移动端 H5，后续可平滑包成小程序/PWA |
-| 通知 | 飞书机器人 Webhook / Server酱 / 邮件（SMTP） | 可插拔通知通道 |
+| 通知 | 飞书机器人 Webhook / Server酱 / 邮件（SMTP） | 可插拔通知通道；飞书绑定步骤见 [飞书通知绑定指南](feishu-notification.md) |
 | 部署 | docker-compose 一键起 | db / redis / backend / frontend |
 
 ## 3. 系统架构
