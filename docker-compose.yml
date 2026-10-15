@@ -46,6 +46,11 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # 固定公共 DNS：默认解析到的行情 CDN 节点会直接断连容器请求
+    # （实测 117.184.38.143 拒连，223.5.5.5 解析到 101.226.30.221 可正常取数）
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     networks: [stock]
 
   frontend:

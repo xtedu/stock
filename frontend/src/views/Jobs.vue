@@ -8,7 +8,7 @@
     </van-cell-group>
 
     <van-cell-group inset title="一键操作">
-      <van-cell title="盘中一键" label="快照 → 筛选 → 区间 → 监控（约1-2分钟）">
+      <van-cell title="盘中一键" label="快照 → 资金流 → 筛选 → 区间 → 监控（约1-2分钟）">
         <template #right-icon>
           <van-button size="small" type="primary" :loading="loading.intraday"
             @click="doJob('intraday')">执行</van-button>
@@ -47,6 +47,12 @@
             @click="doJob('zones')">执行</van-button>
         </template>
       </van-cell>
+      <van-cell title="同步资金流" label="主力/超大单/大单净额与净占比（收盘官方口径）">
+        <template #right-icon>
+          <van-button size="small" :loading="loading.moneyflow"
+            @click="doJob('moneyflow')">执行</van-button>
+        </template>
+      </van-cell>
     </van-cell-group>
 
     <van-cell-group inset title="执行结果" v-if="result">
@@ -63,12 +69,13 @@
 import { reactive, ref } from 'vue'
 import { showToast, showFailToast } from 'vant'
 import {
-  syncQuotes, syncFundamentals, runScreen, calcZones, runIntraday, runMonitor
+  syncQuotes, syncFundamentals, runScreen, calcZones, runIntraday, runMonitor,
+  syncMoneyFlow
 } from '../api'
 
 const loading = reactive({
   quotes: false, fundamentals: false, screen: false,
-  zones: false, intraday: false, monitor: false
+  zones: false, intraday: false, monitor: false, moneyflow: false
 })
 const result = ref('')
 
@@ -78,7 +85,8 @@ const runners = {
   screen: { fn: runScreen, loadingKey: 'screen', name: '选股筛选' },
   zones: { fn: calcZones, loadingKey: 'zones', name: '计算区间' },
   intraday: { fn: runIntraday, loadingKey: 'intraday', name: '盘中一键' },
-  monitor: { fn: runMonitor, loadingKey: 'monitor', name: '监控提醒' }
+  monitor: { fn: runMonitor, loadingKey: 'monitor', name: '监控提醒' },
+  moneyflow: { fn: () => syncMoneyFlow(false), loadingKey: 'moneyflow', name: '同步资金流' }
 }
 
 const doJob = async (key) => {
@@ -99,10 +107,11 @@ const doJob = async (key) => {
 }
 
 const schedule = [
-  { time: '工作日 14:00', desc: '盘中链：快照→筛选→区间→监控，收盘前出结果' },
+  { time: '工作日 14:00', desc: '盘中链：快照→资金流→筛选→区间→监控，收盘前出结果' },
   { time: '工作日 15:40', desc: '收盘行情同步（全市场日线）' },
   { time: '工作日 16:10', desc: '选股筛选' },
   { time: '工作日 16:15', desc: '安全区间计算' },
+  { time: '工作日 16:20', desc: '资金流收盘官方数据（覆盖当日盘中记录）' },
   { time: '工作日 9:30-15:00 每30分钟', desc: '低估区监控提醒' },
   { time: '周六 09:00', desc: '全市场基本面同步（财务+估值）' }
 ]

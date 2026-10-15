@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # 通知通道
     feishu_webhook: str = ""
+    feishu_secret: str = ""          # 机器人「签名校验」的密钥，开了签名校验才需要
     server_chan_sendkey: str = ""
     smtp_host: str = ""
     smtp_port: int = 465

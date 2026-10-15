@@ -119,3 +119,40 @@ class AlertLog(Base):
     notified_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
                                                  server_default=func.now())
     ai_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class CompareAnalysis(Base):
+    """股票池对比分析记录：指标对比 + 大模型次日定性研判。"""
+    __tablename__ = "compare_analyses"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date: Mapped[Date] = mapped_column(Date)
+    codes: Mapped[list | None] = mapped_column(JSONB)
+    items: Mapped[list | None] = mapped_column(JSONB)
+    ai_summary: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class MoneyFlow(Base):
+    """个股资金流（东方财富汇总口径，按单笔成交金额分档推算）。
+
+    主力净额 = 超大单 + 大单净额。盘中为「开盘至今累计」，收盘后为全天值；
+    同一交易日的 official 数据覆盖 intraday 数据。
+    """
+    __tablename__ = "money_flow"
+    __table_args__ = (UniqueConstraint("code", "trade_date"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"))
+    trade_date: Mapped[Date] = mapped_column(Date)
+    main_net: Mapped[float | None] = mapped_column(Numeric(18, 2))      # 主力净额（元）
+    main_net_pct: Mapped[float | None] = mapped_column(Numeric(10, 2))  # 主力净占比 %
+    super_net: Mapped[float | None] = mapped_column(Numeric(18, 2))     # 超大单净额（元）
+    super_net_pct: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    big_net: Mapped[float | None] = mapped_column(Numeric(18, 2))       # 大单净额（元）
+    big_net_pct: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    main_net_5d: Mapped[float | None] = mapped_column(Numeric(18, 2))   # 近5日主力净额（元）
+    source: Mapped[str | None] = mapped_column(String(10))             # intraday / official
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())

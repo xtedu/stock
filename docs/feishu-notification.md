@@ -29,10 +29,10 @@
 1. 打开飞书，进入目标群（没有就新建一个，例如「股票提醒」）。
 2. 点右上角「···」→ 群设置 → **群机器人** → 添加机器人 → **自定义机器人**。
 3. 填写名称（例如「股票提醒」），可选头像，点击下一步。
-4. 安全设置建议**三项全部留空**：
-   - 「签名校验」**必须关闭**——后端未实现签名计算，开启后推送会失败。
-   - 「自定义关键词」若开启，消息正文必须包含该关键词才会投递，容易静默丢消息。
-   - 「IP 白名单」若开启，需要放行容器出口 IP，而该 IP 通常不固定。
+4. 安全设置的取舍（推荐三项全部留空，最省事）：
+   - 「签名校验」可以开启，但开启后必须把机器人给出的**签名密钥**填到 `.env` 的 `FEISHU_SECRET`（见 3.2），后端会自动附加 `timestamp + sign`。
+   - 「自定义关键词」若开启，消息正文必须包含该关键词才会投递，容易静默丢消息，建议留空。
+   - 「IP 白名单」若开启，需要放行容器出口 IP，而该 IP 通常不固定，建议留空。
 5. 复制生成的 Webhook 地址，形如：
 
    ```
@@ -41,22 +41,31 @@
 
 ### 3.2 写入 `.env`
 
-在项目根目录 `.env` 中填写（可参考 `.env.example` 第 23 行）：
+在项目根目录 `.env` 中填写（可参考 `.env.example` 第 23-25 行）：
 
 ```
 FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+# 机器人开了「签名校验」才需要；未开启留空
+FEISHU_SECRET=
 ```
 
 注意事项：
 
 - `.env` 已在 `.gitignore` 中忽略（见 `.gitignore` 第 2 行），不会被提交入库。
 - Webhook 地址等同于凭据，泄露后任何人都能往该群发消息，不要贴到公开场合或工单里。
-- 后端读取配置的方式是 `backend/app/config.py::Settings.feishu_webhook`（pydantic-settings 读取 `.env`），**改完必须重启进程才会生效**。
+- **签名密钥不是 Webhook 地址**：`FEISHU_SECRET` 填机器人安全设置里「签名校验」给出的那串密钥，两者不要混填到同一个变量里。
+- 后端读取配置的方式是 `backend/app/config.py::Settings` 的 `feishu_webhook` / `feishu_secret`（pydantic-settings 读取 `.env`），**改完必须重启进程才会生效**。
 
 ### 3.3 重启后端加载配置
 
 ```powershell
 docker compose up -d backend
+```
+
+注意：`up -d` 只重建容器、重新读取 `.env`；如果改的是**代码**（例如 `notifier.py`），镜像里那份旧代码不会被替换，需要重新构建：
+
+```powershell
+docker compose up -d --build backend
 ```
 
 ### 3.4 建立提醒规则
@@ -89,6 +98,8 @@ docker compose up -d backend
 
 - 标题：`{股票名}({代码}) 低于区间下沿，低估区可关注`
 - 正文：`当前价 X，安全区间 [下沿, 上沿]，预警线 Y（低于区间下沿，低估区可关注）`，后接大模型生成的解读（`backend/app/services/llm.py`）。
+- 若配置了 `FEISHU_SECRET`，请求体会自动附加 `timestamp` 与 `sign`：以 `timestamp + "\n" + secret` 为密钥对空串做 HMAC-SHA256 再 base64（实现见 `_feishu_sign`）。
+- 发送结果以响应体 `code == 0` 判定，非 0 时记 warning 并返回 `False`，避免「HTTP 200 但业务失败」被误判成成功。
 
 ## 5. 验证方式
 
@@ -116,12 +127,24 @@ POST /api/jobs/intraday       # 盘中链：快照 → 筛选 → 区间 → 监
 
 返回 `{"triggered": n}`。常见 `triggered=0` 的原因见下表。
 
+### 5.3 用后端真实代码路径验证一张卡片（推荐）
+
+只发一张，不消耗当日去重额度，也不影响其他标的：
+
+```powershell
+docker compose exec -T backend python -c "from app.services.notifier import send_feishu; print('RESULT:', send_feishu('Feishu link test', 'Sent via backend notifier.send_feishu.'))"
+```
+
+输出 `RESULT: True` 表示配置、签名、投递全通；为 `False` 时查容器日志：`docker compose logs backend --tail 20`。
+
 ## 6. 故障排查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 完全收不到消息 | `FEISHU_WEBHOOK` 为空，或后端未重启加载新配置 | 检查 `.env`，执行 `docker compose up -d backend` |
-| 报签名相关错误（如 `code 19021`） | 机器人开启了「签名校验」 | 关闭签名校验，或后续为 `send_feishu` 补签名实现 |
+| 报 `code 19021` 签名失败 | 机器人开了「签名校验」，但 `.env` 没配 `FEISHU_SECRET`，或值填错（填成了 Webhook、Server酱 Key 等） | 关闭签名校验，或在 `FEISHU_SECRET` 填入机器人给出的签名密钥 |
+| 日志出现 `feishu notify rejected` | 飞书返回 HTTP 200 但业务码非 0 | 按响应体里的 `code` 对照本表逐项排查 |
+| 后端容器反复重启、日志报 `Can't locate revision identified by 'xxxx'` | 镜像里的 Alembic 迁移文件比数据库版本旧 | `docker compose up -d --build backend` 重新构建镜像 |
 | 报关键词不匹配 | 开启了「自定义关键词」 | 关键词填 `安全区间`（卡片正文含该词），或直接留空 |
 | 报 IP 不在白名单 | 开启了「IP 白名单」 | 关闭白名单（容器出口 IP 不固定） |
 | 返回成功但 `triggered=0` | 无启用规则 / 当日已推送过 / 无当日安全区间数据 | 见 5.2 的排查顺序：先查 `GET /api/alerts/rules`，再查 Redis 去重键，最后确认 `safety_zones` 有当日数据 |
@@ -134,8 +157,8 @@ POST /api/jobs/intraday       # 盘中链：快照 → 筛选 → 区间 → 监
 
 | 通道 | 配置项 | 说明 |
 |---|---|---|
-| 飞书 | `FEISHU_WEBHOOK` | 交互式卡片，本文档主通道 |
-| Server酱 | `SERVER_CHAN_SENDKEY` | 微信推送，填 SendKey 即可 |
+| 飞书 | `FEISHU_WEBHOOK`（+ 可选 `FEISHU_SECRET`） | 交互式卡片，本文档主通道 |
+| Server酱 | `SERVER_CHAN_SENDKEY` | 微信推送；代码走老版端点 `https://sctapi.ftqq.com/<key>.send`，填别的密钥会返回 `40001 错误的Key` |
 | 邮件 | `SMTP_HOST/PORT/USER/PASSWORD/FROM/TO` | 需六项齐全，走 SMTP_SSL |
 
 规则未指定 `channels`（或为空）时，`notify()` 会向**所有已配置**的通道投递；指定后只投递指定通道。

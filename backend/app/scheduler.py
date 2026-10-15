@@ -4,7 +4,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .db import SessionLocal
-from .services import datafeed, safety_zone, screener
+from .services import datafeed, money_flow, safety_zone, screener
 from .services.monitor import run_monitor_job
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,8 @@ def _intraday_chain() -> None:
     try:
         n = datafeed.sync_spot_snapshot(db)
         log.info("intraday: spot synced %d", n)
+        mf = money_flow.sync_money_flow(db, intraday=True)
+        log.info("intraday: money flow %s", mf)
         screener.run_screen(db, intraday=True)
         safety_zone.calc_zones(db, intraday=True)
         from .services.monitor import check_and_notify
@@ -58,6 +60,11 @@ def setup_jobs() -> None:
     scheduler.add_job(lambda: _with_db(safety_zone.calc_zones),
                       "cron", day_of_week="mon-fri", hour=16, minute=15,
                       id="calc_zones", replace_existing=True,
+                      max_instances=1, misfire_grace_time=1800)
+    # 16:20 资金流收盘官方数据（覆盖当日盘中累计记录）
+    scheduler.add_job(lambda: _with_db(money_flow.sync_money_flow),
+                      "cron", day_of_week="mon-fri", hour=16, minute=20,
+                      id="sync_money_flow", replace_existing=True,
                       max_instances=1, misfire_grace_time=1800)
     # 周六 09:00 全市场基本面同步（财务 + 估值，耗时数小时）
     scheduler.add_job(lambda: _with_db(datafeed.sync_all_fundamentals, years=5),

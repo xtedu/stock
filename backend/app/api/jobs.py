@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..services import datafeed, monitor, safety_zone, screener
+from ..services import datafeed, money_flow, monitor, safety_zone, screener
 from ..services.datafeed import sync_spot_snapshot
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -37,13 +37,21 @@ def calc_zones(db: Session = Depends(get_db)):
 
 @router.post("/intraday")
 def intraday_run(db: Session = Depends(get_db)):
-    """盘中链手动触发：快照 → 筛选 → 区间 → 监控（约 1-2 分钟）。"""
+    """盘中链手动触发：快照 → 资金流 → 筛选 → 区间 → 监控（约 1-2 分钟）。"""
     from ..services.screener import run_screen
     n = sync_spot_snapshot(db)
+    mf = money_flow.sync_money_flow(db, intraday=True)
     r1 = run_screen(db, intraday=True)
     r2 = safety_zone.calc_zones(db, intraday=True)
     r3 = monitor.check_and_notify(db)
-    return {"spot": n, "screen": r1, "zones": r2, "monitor": r3}
+    return {"spot": n, "money_flow": mf, "screen": r1, "zones": r2,
+            "monitor": r3}
+
+
+@router.post("/money-flow")
+def sync_money_flow(intraday: bool = False, db: Session = Depends(get_db)):
+    """资金流同步：intraday=true 取盘中累计值，false 取收盘官方数据。"""
+    return money_flow.sync_money_flow(db, intraday=intraday)
 
 
 @router.post("/monitor")

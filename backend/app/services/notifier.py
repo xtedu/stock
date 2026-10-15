@@ -1,6 +1,10 @@
 """通知通道：飞书机器人 / Server酱 / 邮件，均为可选，配了才启用。"""
+import base64
+import hashlib
+import hmac
 import logging
 import smtplib
+import time
 from email.mime.text import MIMEText
 
 import httpx
@@ -10,16 +14,32 @@ from ..config import get_settings
 log = logging.getLogger(__name__)
 
 
+def _feishu_sign(timestamp: str, secret: str) -> str:
+    """自定义机器人签名：以 timestamp\\n secret 为密钥对空串做 HMAC-SHA256，再 base64。"""
+    digest = hmac.new(f"{timestamp}\n{secret}".encode(), b"",
+                      hashlib.sha256).digest()
+    return base64.b64encode(digest).decode()
+
+
 def send_feishu(title: str, content: str) -> bool:
-    url = get_settings().feishu_webhook
+    s = get_settings()
+    url = s.feishu_webhook
     if not url:
         return False
     payload = {"msg_type": "interactive",
                "card": {"header": {"title": {"tag": "plain_text", "content": title}},
                         "elements": [{"tag": "markdown", "content": content}]}}
+    if s.feishu_secret:  # 机器人开了「签名校验」才需要
+        timestamp = str(int(time.time()))
+        payload["timestamp"] = timestamp
+        payload["sign"] = _feishu_sign(timestamp, s.feishu_secret)
     try:
         r = httpx.post(url, json=payload, timeout=10)
-        return r.status_code == 200
+        data = r.json()
+        ok = r.status_code == 200 and data.get("code") == 0
+        if not ok:
+            log.warning("feishu notify rejected: %s", r.text)
+        return ok
     except Exception as e:
         log.warning("feishu notify failed: %s", e)
         return False
