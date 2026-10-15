@@ -15,6 +15,17 @@
     </van-nav-bar>
 
     <van-cell-group inset class="filter">
+      <van-cell title="板块" center>
+        <template #value>
+          <van-radio-group v-model="fBoard" direction="horizontal" class="board-rg">
+            <van-radio name="">全部</van-radio>
+            <van-radio name="main">沪深主板</van-radio>
+            <van-radio name="gem">创业板</van-radio>
+            <van-radio name="star">科创板</van-radio>
+            <van-radio name="bj">北交所</van-radio>
+          </van-radio-group>
+        </template>
+      </van-cell>
       <van-cell title="入选来源" center>
         <template #value>
           <van-radio-group v-model="fSource" direction="horizontal">
@@ -109,6 +120,7 @@ const selectMode = ref(false)
 const selected = ref([])
 const analyzing = ref(false)
 
+const fBoard = ref('')
 const fSource = ref('')
 const fChangeMin = ref('')
 const fChangeMax = ref('')
@@ -131,6 +143,16 @@ const levelType = (s) => (s == null ? 'default' : s >= 80 ? 'danger'
   : s >= 60 ? 'warning' : 'default')
 
 const isSel = (code) => selected.value.includes(code)
+
+// 板块按代码前缀派生：60x=沪市主板 00x=深市主板(含原中小板) 300/301=创业板
+// 688/689=科创板 4/8/92 开头=北交所
+const boardOf = (code) => {
+  if (/^(688|689)/.test(code)) return 'star'
+  if (/^(300|301)/.test(code)) return 'gem'
+  if (/^60/.test(code) || /^00/.test(code)) return 'main'
+  if (/^([48]|92)/.test(code)) return 'bj'
+  return 'other'
+}
 const toggle = (code) => {
   if (isSel(code)) {
     selected.value = selected.value.filter(c => c !== code)
@@ -178,6 +200,7 @@ const inRange = (v, lo, hi) => {
 }
 
 const filtered = computed(() => list.value.filter(it => {
+  if (fBoard.value && boardOf(it.code) !== fBoard.value) return false
   if (fSource.value && it.source !== fSource.value) return false
   if (!inRange(it.change_pct, num(fChangeMin.value), num(fChangeMax.value))) return false
   if (!inRange(it.price, num(fPriceMin.value), num(fPriceMax.value))) return false
@@ -187,6 +210,7 @@ const filtered = computed(() => list.value.filter(it => {
 const quoteDate = computed(() => list.value.find(i => i.quote_date)?.quote_date || '')
 
 const resetAll = () => {
+  fBoard.value = ''
   fSource.value = ''
   fChangeMin.value = ''
   fChangeMax.value = ''
@@ -204,6 +228,7 @@ onMounted(async () => {
 .page.has-bar { padding-bottom: 120px; }
 .filter { margin-top: 10px; }
 .nav-btn { margin-left: 8px; }
+.board-rg { max-width: 230px; flex-wrap: wrap; row-gap: 4px; }
 .tip {
   margin: 10px 12px 0;
   padding: 8px 10px;
