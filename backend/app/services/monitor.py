@@ -69,12 +69,23 @@ def check_and_notify(db: Session) -> dict:
             if not hit or _already_notified(code):
                 continue
 
+            # MA20 斜率判定右侧/左侧信号（safety_zone.detail JSONB 里 ma20_slope_up）
+            d = zone.detail if isinstance(zone.detail, dict) else {}
+            slope_up = d.get("ma20_slope_up")
+            slope_pct = d.get("ma20_slope_pct")
+            if slope_up is True:
+                state = f"低于区间下沿 + MA20 拐头向上，右侧确认（斜率 {slope_pct:+.4f}%/日）"
+            elif slope_up is False:
+                state = f"低于区间下沿，左侧观察（MA20 仍下行 {slope_pct:+.4f}%/日）"
+            else:
+                state = "低于区间下沿，低估区可关注（MA20 斜率缺失）"
+
             name = db.get(Stock, code).name if db.get(Stock, code) else code
             summary = llm.summarize(code, name, price, zone_low, zone_high)
-            state = "低于区间下沿，低估区可关注"
             title = f"{name}({code}) {state}"
             content = (f"当前价 {price}，安全区间 [{zone.zone_low}, {zone.zone_high}]，"
-                       f"预警线 {round(warn, 2)}（{state}）\n"
+                       f"预警线 {round(warn, 2)}\n"
+                       f"MA20={d.get('ma20', '-')}，MA20 斜率 {slope_pct:+.4f}%/日\n"
                        + (summary or ""))
             result = notifier.notify(title, content,
                                      channels=rule.channels or None)

@@ -42,7 +42,9 @@ COMPARE_MAX_TOKENS = 1600
 COMPARE_PROMPT = """你是证券分析助手。以下是同一天的候选股票量化指标（来自日线/盘中快照、安全区间、基本面与资金流），表头为列名、每行一只股票：
 
 注：资金流为东方财富按单笔成交金额分档推算的统计口径（主力净额 = 超大单 + 大单净额），并非真实席位数据；
-表中资金流单位为万元，"当日主力净额"为当日累计值（盘中为开盘至今），"-" 表示该维度缺失、不要据此判断。
+表中资金流单位为万元，"当日主力净额"为当日累计值（盘中为开盘至今）；
+MA20斜率%为MA20均线相对斜率（%/日，正值=拐头向上，负值=仍下行），trend_side为左侧/右侧标签（right=右侧确认=MA20斜率>0，left=左侧观察=MA20斜率<=0）；
+"-" 表示该维度缺失、不要据此判断。
 
 请逐只做「次日」的定性研判，并给出相对强弱。硬性要求：
 1. 只做定性判断，禁止编造精确的上涨概率数字或百分比；
@@ -59,15 +61,17 @@ _POS = {"above": "高于上沿", "in": "区间内", "below": "低于下沿"}
 
 
 def _format_table(rows: list[dict]) -> str:
-    head = ("代码 名称 现价 涨幅% 区间下沿 区间上沿 位置 MA250乖离% "
+    head = ("代码 名称 现价 涨幅% 区间下沿 区间上沿 位置 MA250乖离% MA20斜率% 右侧状态 "
             "得分 ROE均值% 营收CAGR% 净利CAGR% PE5年分位% "
             "主力净额万 主力净占比% 超大单净占比% 近5日主力净额万")
+    _SIDE = {"right": "右侧", "left": "左侧"}
     lines = [head]
     for r in rows:
         lines.append(" ".join(str(x if x is not None else "-") for x in (
             r.get("code"), r.get("name"), r.get("price"), r.get("change_pct"),
             r.get("zone_low"), r.get("zone_high"),
             _POS.get(r.get("zone_status"), "-"), r.get("ma250_dev"),
+            r.get("ma20_slope_pct"), _SIDE.get(r.get("trend_side"), "-"),
             r.get("score"), r.get("roe_avg"), r.get("rev_cagr_3y"),
             r.get("profit_cagr_3y"), r.get("pe_percentile"),
             _wan(r.get("main_net")), r.get("main_net_pct"),

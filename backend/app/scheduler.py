@@ -47,7 +47,7 @@ def setup_jobs() -> None:
                       hour=14, minute=0, id="intraday_run",
                       replace_existing=True, max_instances=1,
                       misfire_grace_time=1800)
-    # 交易日 15:40 收盘行情（6 线程约 15-20 分钟）
+    # 交易日 15:40 收盘行情（增量补当日 bar，2 线程随机限速约 25 分钟）
     scheduler.add_job(lambda: _with_db(datafeed.sync_all_quotes, years=5),
                       "cron", day_of_week="mon-fri", hour=15, minute=40,
                       id="sync_quotes", replace_existing=True,
@@ -70,6 +70,11 @@ def setup_jobs() -> None:
     scheduler.add_job(lambda: _with_db(datafeed.sync_all_fundamentals, years=5),
                       "cron", day_of_week="sat", hour=9, minute=0,
                       id="sync_fundamentals", replace_existing=True,
+                      max_instances=1, misfire_grace_time=86400)
+    # 周日 09:00 行业分类同步（申万二级，准静态，约 131 次请求）
+    scheduler.add_job(lambda: _with_db(datafeed.sync_industry),
+                      "cron", day_of_week="sun", hour=9, minute=0,
+                      id="sync_industry", replace_existing=True,
                       max_instances=1, misfire_grace_time=86400)
     # 盘中每 30 分钟监控（9:30-15:00）
     scheduler.add_job(run_monitor_job, "cron", day_of_week="mon-fri",

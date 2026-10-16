@@ -93,11 +93,18 @@ def build_metrics(db: Session, codes: list[str]) -> list[dict]:
             zone_status = "in"
 
         flow = flows.get(code, {})
+        ma20_slope_pct = detail.get("ma20_slope_pct")
+        ma20_slope_up = detail.get("ma20_slope_up")
+        trend_side = ("right" if ma20_slope_up is True
+                      else "left" if ma20_slope_up is False else None)
         items.append({
             "code": code, "name": name, "price": price,
             "change_pct": change_pct, "zone_low": zone_low,
             "zone_high": zone_high, "zone_status": zone_status,
             "ma250_dev": ma250_dev,
+            "ma20_slope_pct": ma20_slope_pct,
+            "ma20_slope_up": ma20_slope_up,
+            "trend_side": trend_side,
             "score": float(p.score) if p.score is not None else None,
             "roe_avg": reason.get("roe_avg"),
             "rev_cagr_3y": reason.get("rev_cagr_3y"),

@@ -20,7 +20,8 @@ import numpy as np
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..models import DailyQuote, FinIndicator, IntradaySpot, Stock, StockPool, ValuationDaily
+from ..models import (DailyQuote, FinIndicator, IntradaySpot, Stock, StockPool,
+                      ValuationDaily, is_bj_code)
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +129,8 @@ def run_screen(db: Session, batch_date: date | None = None,
     selected = 0
     for r in fin_rows:
         code = r.code
-        if code in st_codes or hist.get(code, 0) < GATES["min_history_days"]:
+        if (is_bj_code(code) or code in st_codes
+                or hist.get(code, 0) < GATES["min_history_days"]):
             continue
         lf = latest_fin.get(code)
         if not lf:

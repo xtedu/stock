@@ -16,6 +16,14 @@ class Stock(Base):
     list_date: Mapped[Date | None] = mapped_column(Date)
 
 
+# 北交所代码前缀（43/83/87/88/920 开头），本项目统一只处理沪深
+BJ_PREFIXES = ("4", "8", "92")
+
+
+def is_bj_code(code: str) -> bool:
+    return code.startswith(BJ_PREFIXES)
+
+
 class DailyQuote(Base):
     __tablename__ = "daily_quotes"
     __table_args__ = (UniqueConstraint("code", "trade_date"),)

@@ -18,11 +18,29 @@
       <van-cell title="板块" center>
         <template #value>
           <van-radio-group v-model="fBoard" direction="horizontal" class="board-rg">
-            <van-radio name="">全部</van-radio>
+            <van-radio name="hs">沪深</van-radio>
             <van-radio name="main">沪深主板</van-radio>
             <van-radio name="gem">创业板</van-radio>
             <van-radio name="star">科创板</van-radio>
-            <van-radio name="bj">北交所</van-radio>
+          </van-radio-group>
+        </template>
+      </van-cell>
+      <van-cell title="趋势侧" center>
+        <template #value>
+          <van-radio-group v-model="fSide" direction="horizontal" class="board-rg">
+            <van-radio name="">全部</van-radio>
+            <van-radio name="right">右侧确认</van-radio>
+            <van-radio name="left">左侧观察</van-radio>
+          </van-radio-group>
+        </template>
+      </van-cell>
+      <van-cell title="区间位置" center>
+        <template #value>
+          <van-radio-group v-model="fZone" direction="horizontal" class="board-rg">
+            <van-radio name="">全部</van-radio>
+            <van-radio name="below">低于下沿</van-radio>
+            <van-radio name="in">区间内</van-radio>
+            <van-radio name="above">高于上沿</van-radio>
           </van-radio-group>
         </template>
       </van-cell>
@@ -84,6 +102,16 @@
         <span class="ohl">开 {{ fmt(item.open) }} · 收 {{ fmt(item.close) }}</span>
       </div>
       <div class="row badges">
+        <van-tag v-if="item.industry" plain>{{ item.industry }}</van-tag>
+        <van-tag v-if="item.trend_side === 'right'" type="danger" plain>
+          右侧确认 MA20 {{ fmtPct(item.ma20_slope_pct) }}
+        </van-tag>
+        <van-tag v-else-if="item.trend_side === 'left'" plain>
+          左侧观察 MA20 {{ fmtPct(item.ma20_slope_pct) }}
+        </van-tag>
+        <van-tag v-if="item.zone_status === 'below'" type="danger" plain>低于下沿</van-tag>
+        <van-tag v-else-if="item.zone_status === 'in'" type="success" plain>区间内</van-tag>
+        <van-tag v-else-if="item.zone_status === 'above'" type="warning" plain>高于上沿</van-tag>
         <van-tag type="success" plain>ROE {{ r(item, 'roe_avg') }}%</van-tag>
         <van-tag type="primary" plain>营收CAGR {{ r(item, 'rev_cagr_3y') }}%</van-tag>
         <van-tag type="warning" plain>PE分位 {{ pct(item) }}</van-tag>
@@ -120,7 +148,9 @@ const selectMode = ref(false)
 const selected = ref([])
 const analyzing = ref(false)
 
-const fBoard = ref('')
+const fBoard = ref('hs')
+const fSide = ref('right')
+const fZone = ref('')
 const fSource = ref('')
 const fChangeMin = ref('')
 const fChangeMax = ref('')
@@ -200,7 +230,12 @@ const inRange = (v, lo, hi) => {
 }
 
 const filtered = computed(() => list.value.filter(it => {
-  if (fBoard.value && boardOf(it.code) !== fBoard.value) return false
+  // 沪深 = 主板 + 创业板 + 科创板（排除北交所）
+  if (fBoard.value === 'hs') {
+    if (boardOf(it.code) === 'bj') return false
+  } else if (fBoard.value && boardOf(it.code) !== fBoard.value) return false
+  if (fSide.value && it.trend_side !== fSide.value) return false
+  if (fZone.value && it.zone_status !== fZone.value) return false
   if (fSource.value && it.source !== fSource.value) return false
   if (!inRange(it.change_pct, num(fChangeMin.value), num(fChangeMax.value))) return false
   if (!inRange(it.price, num(fPriceMin.value), num(fPriceMax.value))) return false
@@ -210,7 +245,9 @@ const filtered = computed(() => list.value.filter(it => {
 const quoteDate = computed(() => list.value.find(i => i.quote_date)?.quote_date || '')
 
 const resetAll = () => {
-  fBoard.value = ''
+  fBoard.value = 'hs'
+  fSide.value = 'right'
+  fZone.value = ''
   fSource.value = ''
   fChangeMin.value = ''
   fChangeMax.value = ''

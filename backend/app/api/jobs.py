@@ -10,8 +10,13 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 @router.post("/sync-quotes")
-def sync_quotes(years: int = 5, db: Session = Depends(get_db)):
-    return datafeed.sync_all_quotes(db, years=years)
+def sync_quotes(years: int = 5, limit: int | None = None,
+                db: Session = Depends(get_db)):
+    """全市场日线增量同步（东财优先、失败降级新浪，限速 + 熔断）。
+
+    limit 用于小批量试跑（如 limit=40 只沪深票）。
+    """
+    return datafeed.sync_all_quotes(db, years=years, limit=limit)
 
 
 @router.post("/sync-fundamentals")
@@ -23,6 +28,12 @@ def sync_fundamentals(years: int = 5, db: Session = Depends(get_db)):
 @router.post("/sync-one/{code}")
 def sync_one(code: str, db: Session = Depends(get_db)):
     return datafeed.sync_stock_fundamentals(db, code)
+
+
+@router.post("/sync-industry")
+def sync_industry(db: Session = Depends(get_db)):
+    """同步申万二级行业分类到 stocks.industry（准静态，手动触发）。"""
+    return datafeed.sync_industry(db)
 
 
 @router.post("/screen")

@@ -19,11 +19,19 @@ class PoolItemOut(BaseModel):
     reason: dict[str, Any] | None = None
     batch_date: date
     source: str | None = None          # 入选来源：intraday(盘中) / official(收盘)
+    industry: str | None = None         # 所属行业（申万二级）
     price: float | None = None         # 现价（优先盘中快照，否则最新收盘）
     open: float | None = None          # 最新交易日开盘价
     close: float | None = None         # 最新交易日收盘价
     change_pct: float | None = None    # 涨幅（现价相对上一交易日收盘，%）
     quote_date: date | None = None     # 行情日期
+    # 安全区间 + MA20 斜率（左/右侧判定来自 safety_zone.detail JSONB）
+    zone_low: float | None = None
+    zone_high: float | None = None
+    zone_status: str | None = None     # above / in / below
+    ma20_slope_pct: float | None = None   # MA20 相对斜率 %/日（正值=拐头向上）
+    ma20_slope_up: bool | None = None     # MA20 斜率是否 > 0
+    trend_side: str | None = None         # right=右侧确认 / left=左侧观察 / None=缺失
 
 
 class SafetyZoneOut(BaseModel):

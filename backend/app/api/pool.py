@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import DailyQuote, IntradaySpot, Stock, StockPool
+from ..models import DailyQuote, IntradaySpot, SafetyZone, Stock, StockPool
 from ..schemas import PoolItemOut
 
 router = APIRouter(prefix="/api/pool", tags=["pool"])
@@ -12,13 +12,13 @@ router = APIRouter(prefix="/api/pool", tags=["pool"])
 @router.get("", response_model=list[PoolItemOut])
 def list_pool(limit: int = 100, min_score: float = 0,
               db: Session = Depends(get_db)):
-    rows = (db.query(StockPool, Stock.name)
+    rows = (db.query(StockPool, Stock.name, Stock.industry)
             .join(Stock, Stock.code == StockPool.code)
             .filter(StockPool.active.is_(True),
                     StockPool.score >= min_score)
             .order_by(StockPool.score.desc())
             .limit(limit).all())
-    codes = [p.code for p, _ in rows]
+    codes = [p.code for p, _, _ in rows]
     if not codes:
         return []
 
@@ -42,8 +42,15 @@ def list_pool(limit: int = 100, min_score: float = 0,
     spots = {s.code: s for s in db.query(IntradaySpot)
              .filter(IntradaySpot.code.in_(codes)).all()}
 
+    # 每只股票最新一条安全区间（用于 zone_status / MA20 斜率 / 左-右侧判定）
+    zones: dict[str, SafetyZone] = {}
+    for z in (db.query(SafetyZone)
+              .filter(SafetyZone.code.in_(codes))
+              .order_by(SafetyZone.calc_date.desc()).all()):
+        zones.setdefault(z.code, z)
+
     items = []
-    for p, name in rows:
+    for p, name, industry in rows:
         q = quotes.get(p.code, {})
         spot = spots.get(p.code)
         close = q.get("close")
@@ -57,9 +64,32 @@ def list_pool(limit: int = 100, min_score: float = 0,
             price, base = close, prev_close
         change_pct = (round((price - base) / base * 100, 2)
                       if price is not None and base else None)
+
+        # 安全区间 + MA20 斜率 + 左-右侧判定
+        z = zones.get(p.code)
+        detail = z.detail if z and isinstance(z.detail, dict) else {}
+        zone_low = float(z.zone_low) if z and z.zone_low is not None else None
+        zone_high = float(z.zone_high) if z and z.zone_high is not None else None
+        if price is None or zone_low is None or zone_high is None:
+            zone_status = None
+        elif price > zone_high:
+            zone_status = "above"
+        elif price < zone_low:
+            zone_status = "below"
+        else:
+            zone_status = "in"
+        ma20_slope_pct = detail.get("ma20_slope_pct")
+        ma20_slope_up = detail.get("ma20_slope_up")
+        trend_side = ("right" if ma20_slope_up is True
+                      else "left" if ma20_slope_up is False else None)
+
         items.append(PoolItemOut(
             code=p.code, name=name, score=p.score, reason=p.reason,
             batch_date=p.batch_date, source=(p.reason or {}).get("source"),
+            industry=industry,
             price=price, open=q.get("open"), close=close,
-            change_pct=change_pct, quote_date=q.get("quote_date")))
+            change_pct=change_pct, quote_date=q.get("quote_date"),
+            zone_low=zone_low, zone_high=zone_high, zone_status=zone_status,
+            ma20_slope_pct=ma20_slope_pct, ma20_slope_up=ma20_slope_up,
+            trend_side=trend_side))
     return items

@@ -115,6 +115,13 @@ def _calc_one(db: Session, code: str, calc_date: date,
     ma20 = float(np.mean(closes[-20:]))
     std20 = float(np.std(closes[-20:]))
     boll_lower = ma20 - 2 * std20
+    # MA20 斜率：用最近 MA20 与 5 天前 MA20 差 / 5（日），相对斜率 = 绝对斜率 / ma20
+    # closes 是时间正序（最早在前），closes[-20:] = 最近 20 天，closes[-25:-5] = 倒数 25~倒数 5 天（即 5 天前的 MA20）
+    # closes 长度已由 len(closes) >= 250 保证，无需额外检查
+    ma20_past = float(np.mean(closes[-25:-5]))   # 5 天前的 MA20
+    ma20_slope = (ma20 - ma20_past) / 5.0        # 绝对斜率：元/日
+    ma20_slope_pct = (ma20 / ma20_past - 1) * 100 / 5.0 if ma20_past else 0.0   # 相对斜率：%/日
+    ma20_slope_up = ma20_slope_pct > 0.0         # 短期均线拐头向上
 
     center = round(ma250, 2)
     zone_low = round(center * ZONE_LOW_RATIO, 2)
@@ -143,6 +150,9 @@ def _calc_one(db: Session, code: str, calc_date: date,
               "price_pct": price_band, "pe_percentile": pe_pct,
               "pe_current": pe_detail.get("pe_current"),
               "warn_line": round(boll_lower, 2), "pe_squeeze": pe_squeeze,
+              "ma20": round(ma20, 2), "ma20_slope": round(ma20_slope, 4),
+              "ma20_slope_pct": round(ma20_slope_pct, 4),
+              "ma20_slope_up": ma20_slope_up,
               "used": used,
               "source": "intraday" if intraday else "official"}
 
