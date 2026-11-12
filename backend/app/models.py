@@ -1,3 +1,5 @@
+from datetime import date
+
 from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, BigInteger,
                         Numeric, String, Text, UniqueConstraint, func)
 from sqlalchemy.dialects.postgresql import JSONB
@@ -14,6 +16,8 @@ class Stock(Base):
     industry: Mapped[str | None] = mapped_column(String(50))
     market: Mapped[str | None] = mapped_column(String(10))
     list_date: Mapped[Date | None] = mapped_column(Date)
+    # 流通市值（元），用于消息消化度的市值分层
+    float_mv: Mapped[float | None] = mapped_column(Numeric(20, 2))
 
 
 # 北交所代码前缀（43/83/87/88/920 开头），本项目统一只处理沪深
@@ -163,4 +167,88 @@ class MoneyFlow(Base):
     main_net_5d: Mapped[float | None] = mapped_column(Numeric(18, 2))   # 近5日主力净额（元）
     source: Mapped[str | None] = mapped_column(String(10))             # intraday / official
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class NewsItem(Base):
+    """政策 / 快讯 / 公司公告聚合。source+title 唯一用于幂等去重。"""
+    __tablename__ = "news_items"
+    __table_args__ = (UniqueConstraint("source", "title"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(20))      # cls/em/sina/cctv/notice
+    category: Mapped[str | None] = mapped_column(String(20))  # policy/macro/industry/company
+    title: Mapped[str] = mapped_column(String(400))
+    summary: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(String(500))
+    published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    trade_date: Mapped[date] = mapped_column(Date)
+    related_codes: Mapped[list | None] = mapped_column(JSONB)
+    # 利好消化度：{code: {ret5, day_chg, vol_ratio, from_high20, state}}
+    digest: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class NewsBrief(Base):
+    """每日消息面 AI 决策简报（一天一条）。"""
+    __tablename__ = "news_briefs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brief_date: Mapped[date] = mapped_column(Date, unique=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class CalendarEvent(Base):
+    """前瞻事件日历：宏观数据、限售解禁、业绩预告。
+
+    与 news_items 的区别是「还没发生」，用于提前布局/规避。
+    """
+    __tablename__ = "calendar_events"
+    __table_args__ = (UniqueConstraint("kind", "event_date", "title"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16))   # macro / release / forecast
+    event_date: Mapped[date] = mapped_column(Date)
+    title: Mapped[str] = mapped_column(String(300))
+    detail: Mapped[dict | None] = mapped_column(JSONB)
+    importance: Mapped[int] = mapped_column(Integer, default=1)  # 1-3
+    related_codes: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class YaoguSnapshot(Base):
+    """妖股/涨停池每日快照（一个交易日 × 一只涨停股一行）。
+
+    落库后可回看梯队演化、行业涨停分布，也是后续「晋级/断板」统计的样本底表。
+    """
+    __tablename__ = "yaogu_snapshot"
+    __table_args__ = (UniqueConstraint("trade_date", "code",
+                                       name="uq_yaogu_snapshot_date_code"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    code: Mapped[str] = mapped_column(String(10), index=True)
+    name: Mapped[str | None] = mapped_column(String(50))
+    industry: Mapped[str | None] = mapped_column(String(50))
+    close: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    amount_yi: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    streak: Mapped[int] = mapped_column(Integer, default=1)
+    high_days: Mapped[str | None] = mapped_column(String(20))
+    limit_up_type: Mapped[str | None] = mapped_column(String(20))
+    first_limit_time: Mapped[str | None] = mapped_column(String(10))
+    last_limit_time: Mapped[str | None] = mapped_column(String(10))
+    break_count: Mapped[int | None] = mapped_column(Integer)
+    seal_amount_yi: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    turnover_rate: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    float_mv_yi: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    ret20_pct: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    amplitude_pct: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    reason: Mapped[str | None] = mapped_column(Text)
+    is_open_board: Mapped[bool | None] = mapped_column(Boolean)
+    score: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
                                                  server_default=func.now())

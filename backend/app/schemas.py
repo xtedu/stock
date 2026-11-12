@@ -34,6 +34,29 @@ class PoolItemOut(BaseModel):
     trend_side: str | None = None         # right=右侧确认 / left=左侧观察 / None=缺失
 
 
+class PickOut(BaseModel):
+    code: str
+    name: str | None = None
+    industry: str | None = None
+    rank: int
+    score: float | None = None            # 池内分位打分（利润 70% + 营收 30%）
+    price: float | None = None
+    change_pct: float | None = None       # 当日涨跌幅 %
+    profit_growth: float | None = None    # 利润增速 %
+    revenue_growth: float | None = None   # 营收增速 %
+    roe_avg: float | None = None
+    debt_ratio: float | None = None
+    zone_low: float | None = None
+    zone_high: float | None = None
+    zone_status: str | None = None        # above / in / below
+    ma20_slope_pct: float | None = None   # MA20 相对斜率 %/日
+    ma20_slope_up: bool | None = None
+    ind_heat3: int | None = None          # 所属行业近3个交易日涨停家数
+    ret20: float | None = None            # 20日涨跌幅 %
+    ret60: float | None = None            # 60日涨跌幅 %
+    tags: list[str] = []                  # 提示标签（仅展示，不参与筛选）
+
+
 class SafetyZoneOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

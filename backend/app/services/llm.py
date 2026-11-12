@@ -115,3 +115,60 @@ def compare(rows: list[dict]) -> dict | None:
     except Exception as e:
         log.warning("llm compare failed: %s", e)
         return None
+
+
+# --------------------------------------------------------------------------- #
+# 消息面研判（政策 / 快讯 / 公告 → 对板块与池内标的的影响）
+# --------------------------------------------------------------------------- #
+
+NEWS_MAX_TOKENS = 3500
+
+NEWS_PROMPT = """你是 A 股消息面与事件驱动分析助手。输入分三部分：
+A. 当日消息（政策/快讯/公告），部分条目末尾附【股价已反应度】
+B. 未来事件日历（宏观数据含预期值/前值、限售解禁、业绩预告）
+C. 股票池标的
+
+A 股的核心规律是「利好出尽即利空」：消息公布前股价已大涨、当日冲高回落的，往往就是兑现卖点；
+股价尚未反应而消息实质超预期的，才存在预期差空间。请按此逻辑判断，不要简单把利好等同于看涨。
+
+硬性要求：
+1. 只做定性判断，禁止给出涨跌概率等精确数字；
+2. sentiment 只能是「偏多」「中性」「偏空」之一；
+3. ahead：从 B 中挑最多 6 条对未来 10 个交易日影响最大的事件，impact 只能是「利好」「利空」「中性」，note 说明预期差怎么看，不超过 40 字；
+4. priced_in：股价已充分反应、属于兑现利好的标的，最多 5 条，reason 必须引用【股价已反应度】里的前 5 日涨幅与 σ 倍数（例如「前5日+12%≈2.1σ，已超兑现阈值」）；
+5. unpriced：消息实质正面但股价尚未反应（错杀或横盘）的标的，最多 5 条，没有就输出空数组；
+6. risks 最多 3 条，每条不超过 40 字；
+7. overall 不超过 80 字，必须点明「哪些利好已兑现、哪些还没」；
+8. 严格只输出完整 JSON，不要 markdown 代码块、不要多余文字，且必须闭合。
+
+格式：
+{"sentiment": "偏多", "overall": "总结", "ahead": [{"date": "2026-11-12", "event": "事件", "impact": "利好", "note": "预期差判断"}], "priced_in": [{"code": "002425", "name": "凯撒文化", "reason": "前5日+12%已兑现"}], "unpriced": [{"code": "600000", "name": "浦发银行", "reason": "消息正面但股价横盘"}], "risks": ["风险"]}"""
+
+
+def news_brief(items_text: str, pool_text: str,
+               calendar_text: str = "") -> dict | None:
+    """消息面 + 前瞻事件研判：返回 sentiment/overall/ahead/priced_in/unpriced/risks。"""
+    s = get_settings()
+    if not (s.llm_enabled and s.llm_api_key) or not items_text:
+        return None
+    try:
+        resp = OpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key,
+                      timeout=max(s.llm_timeout, 90)).chat.completions.create(
+            model=s.llm_model,
+            messages=[{"role": "user", "content":
+                       NEWS_PROMPT
+                       + "\n\n== A. 当日消息 ==\n" + items_text
+                       + "\n\n== B. 未来事件日历 ==\n"
+                       + (calendar_text or "（暂无）")
+                       + "\n\n== C. 股票池 ==\n" + (pool_text or "（空）")}],
+            max_tokens=NEWS_MAX_TOKENS,
+        )
+        raw = resp.choices[0].message.content
+        out = _extract_json(raw)
+        if out is None:
+            log.warning("llm news_brief non-json output: %s",
+                        (raw or "")[:300])
+        return out
+    except Exception as e:
+        log.warning("llm news_brief failed: %s", e)
+        return None

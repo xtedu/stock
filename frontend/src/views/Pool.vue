@@ -6,6 +6,8 @@
           <van-button size="mini" plain @click="exitSelect">取消</van-button>
         </template>
         <template v-else>
+          <van-button size="mini" plain type="danger" class="nav-btn"
+                      @click="$router.push('/picks')">三只</van-button>
           <van-button size="mini" plain type="primary" class="nav-btn"
                       @click="enterSelect">对比</van-button>
           <van-button size="mini" plain class="nav-btn"
@@ -137,6 +139,9 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { showToast } from 'vant'
 import { analyzeCompare, getPool } from '../api'
+
+// 供 keep-alive include 匹配，从详情页返回时保留筛选条件与滚动位置
+defineOptions({ name: 'Pool' })
 
 const router = useRouter()
 const maxSel = 8

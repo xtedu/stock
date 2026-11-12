@@ -1,0 +1,78 @@
+# 生产部署（服务器独占使用）：docker compose -f docker-compose.prod.yml up -d --build
+# 与本地 docker-compose.yml 的区别：
+#   1. 所有服务只监听 127.0.0.1，外部访问统一走宿主机 nginx（终止 TLS）
+#   2. 前端容器映射到 8080，宿主机 nginx 反代到此端口
+#   3. 项目名固定为 stock，避免与其他 compose 项目冲突
+name: stock
+
+services:
+  db:
+    image: paradedb/paradedb:0.25.3-pg16
+    container_name: stock-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stock}
+      POSTGRES_USER: ${POSTGRES_USER:-stock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?need POSTGRES_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [stock]
+
+  redis:
+    image: redis:7-alpine
+    container_name: stock-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [stock]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stock-backend
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    networks: [stock]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stock-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8080:80"
+    networks: [stock]
+
+volumes:
+  pgdata:
+
+networks:
+  stock:
+    driver: bridge

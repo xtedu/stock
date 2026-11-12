@@ -4,13 +4,16 @@
 - 财务指标（报告期）/ 估值历史 PE/PB（个股）
 """
 import logging
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 import akshare as ak
+import numpy as np
 import pandas as pd
+import requests
 from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -57,24 +60,50 @@ _SINA_RENAME = {"date": "日期", "open": "开盘", "high": "最高",
                 "low": "最低", "close": "收盘", "volume": "成交量",
                 "amount": "成交额"}
 
+# 腾讯前复权日线：akshare 的 sina 接口在多线程下会段错误，这里直连 HTTP
+_TX_KLINE_URL = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+                 "?param={sym},day,{start},{end},640,qfq")
+_TX_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
 
 def _fetch_em(code: str, start: str, end: str) -> pd.DataFrame:
     return ak.stock_zh_a_hist(symbol=code, period="daily",
                               start_date=start, end_date=end, adjust="qfq")
 
 
-def _fetch_sina(code: str, start: str, end: str) -> pd.DataFrame | None:
-    """新浪日线（仅沪深）。列名对齐库内口径，成交量由「股」换算为「手」。"""
+def _fetch_tencent(code: str, start: str, end: str) -> pd.DataFrame | None:
+    """腾讯前复权日线（仅沪深）。纯 requests 实现，线程安全。
+
+    腾讯单次最多返回 640 根，超出时按最早日期向前翻页。
+    接口只提供 成交量（手），成交额按 成交量 × 100 × 收盘价 近似。
+    """
     sym = _sina_symbol(code)
     if sym is None:
         return None
-    df = ak.stock_zh_a_daily(symbol=sym, start_date=start, end_date=end,
-                             adjust="qfq")
-    if df is None or df.empty:
-        return df
-    df = df.rename(columns=_SINA_RENAME)
-    df["成交量"] = df["成交量"] / 100.0
-    return df
+    s = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    e = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    rows: list[list] = []
+    for _ in range(6):  # 最多向前翻 6 页（约 15 年）
+        url = _TX_KLINE_URL.format(sym=sym, start=s, end=e)
+        payload = requests.get(url, timeout=15, headers=_TX_HEADERS).json()
+        node = (payload.get("data") or {}).get(sym) or {}
+        day = node.get("qfqday") or node.get("day") or []
+        if not day:
+            break
+        rows = day + rows
+        if len(day) < 640 or day[0][0] <= s:
+            break
+        e = (pd.Timestamp(day[0][0]) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    if not rows:
+        return None
+    df = pd.DataFrame([r[:6] for r in rows],
+                      columns=["日期", "开盘", "收盘", "最高", "最低", "成交量"])
+    for c in ("开盘", "收盘", "最高", "最低", "成交量"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["日期"] = pd.to_datetime(df["日期"])
+    df = df.drop_duplicates(subset=["日期"]).sort_values("日期")
+    df["成交额"] = df["成交量"] * 100.0 * df["收盘"]
+    return df.reset_index(drop=True)
 
 
 def _retry(fn, attempts: int = 3):
@@ -101,11 +130,11 @@ def _fetch_quotes(code: str, start: str, end: str, use_em: bool = True):
         if df is not None:
             return code, df, "eastmoney"
     if is_bj_code(code):
-        log.warning("quotes skipped (北交所无新浪源): %s", code)
+        log.warning("quotes skipped (北交所无可用数据源): %s", code)
         return code, None, "skipped"
-    df = _retry(lambda: _fetch_sina(code, start, end))
+    df = _retry(lambda: _fetch_tencent(code, start, end))
     time.sleep(random.uniform(0.3, 0.8))
-    return code, df, ("sina" if df is not None else "fail")
+    return code, df, ("tencent" if df is not None else "fail")
 
 
 def _upsert_quotes(db: Session, code: str, df: pd.DataFrame) -> int:
@@ -157,7 +186,7 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
         return {"stocks": total, "fetched": 0, "rows": 0, "source": "-"}
 
     end = today.strftime("%Y%m%d")
-    # 探活：先用一只沪深票试东财，失败则本次全程走新浪（不白撞被封的源）
+    # 探活：先用一只沪深票试东财，成功则高并发跑东财；失败则全程低并发走新浪
     use_em = False
     probe = next((c for c in todo if not is_bj_code(c)), None)
     if probe is not None:
@@ -169,48 +198,148 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
             log.warning("eastmoney quotes unavailable, fallback to sina: %s",
                         str(e)[:80])
 
+    # 并发统一压到 2：akshare 底层原生扩展在多线程并发下曾出现 SIGSEGV
+    # （2 核小内存机上尤为明显），与本地长时间验证过的配置保持一致。
+    max_workers = int(os.getenv("QUOTES_SYNC_WORKERS", "2"))
+    em_workers = max_workers
+    sg_workers = max_workers
+
     def _start_of(code: str) -> str:
         last = latest.get(code)
-        return ((last + timedelta(days=1)) if last
-                else (today - timedelta(days=years * 365))).strftime("%Y%m%d")
+        if last is None:
+            return (today - timedelta(days=years * 365)).strftime("%Y%m%d")
+        # 新浪 stock_zh_a_daily 不认 start==end 的单天窗口。
+        # 对 last 接近 today 的股票（差 1-2 天），把 start 提前到 today-2
+        # 确保至少 3 天窗口；对 last 较早的股票（差 >2 天），直接用 last+1。
+        ideal = last + timedelta(days=1)
+        return min(ideal, today - timedelta(days=2)).strftime("%Y%m%d")
 
-    ok = rows = consec = 0
+    ok = rows = 0
+    fail = 0
     src: dict[str, int] = {}
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    # 熔断改成**成功率判定**：处理到 50 只时如果 fail >= 45（90% 失败），
+    # 说明两个源都挂了才 abort；否则跑完。避免"连续 25 只 fail 就 abort"
+    # 的激进逻辑——线程池并发时前几批很可能因为网络抖动全挂。
+    _abort_ratio = 0.90
+    _abort_window = 50
+    processed = 0
+
+    def _pick_workers(use_em_flag: bool) -> int:
+        return em_workers if use_em_flag else sg_workers
+
+    with ThreadPoolExecutor(max_workers=_pick_workers(use_em)) as ex:
         futs = {ex.submit(_fetch_quotes, c, _start_of(c), end, use_em): c
                 for c in todo}
         for fut in as_completed(futs):
             code, df, source = fut.result()
+            processed += 1
             src[source] = src.get(source, 0) + 1
-            consec = consec + 1 if source == "fail" else 0
+            if source == "fail":
+                fail += 1
             if df is not None and not df.empty:
                 rows += _upsert_quotes(db, code, df)
                 ok += 1
-            if consec >= 25:
-                log.warning("quotes sync aborted after %d consecutive failures",
-                            consec)
+            # 熔断：处理足够样本后，失败率超过阈值才判定两源全挂
+            if (processed >= _abort_window
+                    and fail / processed >= _abort_ratio
+                    and fail >= _abort_window * _abort_ratio):
+                log.error("quotes sync aborted: %d/%d failed after %d processed (%.0f%%)",
+                          fail, len(todo), processed, fail / processed * 100)
                 for f in futs:
                     f.cancel()
                 break
-    log.info("quotes synced: %d/%d stocks, %d rows, src=%s",
-             ok, len(todo), rows, src)
+    # 跑完后检查覆盖率：如果今日行情覆盖率低于 80%，记 warning
+    db.commit()
+    coverage = db.query(func.count(DailyQuote.code.distinct())
+                        .filter(DailyQuote.trade_date == today)).scalar() or 0
+    hs_total = len([c for c, in db.query(Stock.code).all()
+                    if not is_bj_code(c)])
+    cov_pct = coverage / hs_total * 100 if hs_total else 0
+    if cov_pct < 80:
+        log.warning("daily quotes coverage low: %.1f%% (%d/%d)",
+                    cov_pct, coverage, hs_total)
+    log.info("quotes synced: %d/%d stocks, %d rows, src=%s, coverage=%.1f%%",
+             ok, len(todo), rows, src, cov_pct)
     return {"stocks": total, "fetched": ok, "rows": rows, "source": src,
-            "eastmoney": use_em}
+            "eastmoney": use_em, "coverage": round(cov_pct, 1)}
 
 
 # ---------- 盘中全市场快照 ----------
 
+def _fetch_spot_em() -> pd.DataFrame:
+    return ak.stock_zh_a_spot_em()
+
+
+def _fetch_spot_sina() -> pd.DataFrame:
+    """新浪全市场快照：代码带 sh/sz/bj 前缀需去掉；不含 PE/PB。"""
+    df = ak.stock_zh_a_spot()
+    df["代码"] = df["代码"].astype(str).str.replace(r"^(sh|sz|bj)", "",
+                                                    regex=True)
+    return df
+
+
+def fetch_spot_bars() -> pd.DataFrame | None:
+    """盘中全市场快照 → 标准化 OHLCV（只读，不落库）。
+
+    东财优先、新浪降级，失败返回 None。供妖股盘中模式拼当日临时 K 线。
+    """
+    col_map = {"代码": "code", "今开": "open", "最高": "high", "最低": "low",
+               "最新价": "close", "成交量": "volume", "成交额": "amount",
+               "涨跌幅": "pct_chg"}
+    try:
+        df = _fetch_spot_em()
+    except Exception as e:  # noqa: BLE001
+        log.warning("eastmoney spot unavailable, fallback to sina: %s",
+                    str(e)[:80])
+        try:
+            df = _retry(_fetch_spot_sina)
+        except Exception as e2:  # noqa: BLE001
+            log.error("spot fetch failed: %s", str(e2)[:80])
+            return None
+    if df is None or df.empty or "代码" not in df.columns:
+        return None
+    keep = {k: v for k, v in col_map.items() if k in df.columns}
+    out = df[list(keep)].rename(columns=keep)
+    for c in out.columns:
+        if c != "code":
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["code"] = (out["code"].astype(str)
+                   .str.replace(r"^(sh|sz|bj)", "", regex=True).str.zfill(6))
+    out = out[out["code"].str.len() == 6]
+    out = out[~out["code"].apply(is_bj_code)]
+    out = out[out["close"].fillna(0) > 0]
+    for c in ("open", "high", "low", "volume", "amount", "pct_chg"):
+        if c not in out.columns:
+            out[c] = np.nan
+    return out.reset_index(drop=True)
+
+
 def sync_spot_snapshot(db: Session) -> int:
-    """单次调用拉取全市场最新价/PE/PB，覆盖写入 intraday_spot（约10秒）。"""
-    df = ak.stock_zh_a_spot_em()
+    """全市场最新价快照：东财优先，失败降级新浪，覆盖写入 intraday_spot。
+
+    本表 pe/pb 无任何消费方（各处只读 price），新浪源缺失时写 None。
+    """
     today = date.today()
+    try:
+        df = _fetch_spot_em()
+        pe_col, pb_col, src = "市盈率-动态", "市净率", "eastmoney"
+    except Exception as e:
+        log.warning("eastmoney spot unavailable, fallback to sina: %s",
+                    str(e)[:80])
+        df = _retry(_fetch_spot_sina)
+        pe_col = pb_col = None
+        src = "sina"
+    if df is None:
+        log.error("spot snapshot failed: eastmoney and sina both unavailable")
+        return 0
     rows = []
     for _, r in df.iterrows():
         code = str(r.get("代码", ""))
         if len(code) != 6 or is_bj_code(code):
             continue
         rows.append({"code": code, "price": _f(r.get("最新价")),
-                     "pe": _f(r.get("市盈率-动态")), "pb": _f(r.get("市净率")),
+                     "pe": _f(r.get(pe_col)) if pe_col else None,
+                     "pb": _f(r.get(pb_col)) if pb_col else None,
                      "trade_date": today})
     if not rows:
         return 0
@@ -223,7 +352,7 @@ def sync_spot_snapshot(db: Session) -> int:
     )
     db.execute(stmt)
     db.commit()
-    log.info("spot snapshot synced: %d rows", len(rows))
+    log.info("spot snapshot synced: %d rows (src=%s)", len(rows), src)
     return len(rows)
 
 

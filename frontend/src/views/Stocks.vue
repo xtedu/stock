@@ -18,6 +18,9 @@
 import { onMounted, ref } from 'vue'
 import { getStocks } from '../api'
 
+// 供 keep-alive include 匹配，从详情页返回时保留列表与滚动位置
+defineOptions({ name: 'Stocks' })
+
 const keyword = ref('')
 const items = ref([])
 const loading = ref(false)

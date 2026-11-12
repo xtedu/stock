@@ -1,7 +1,7 @@
 <template>
   <div class="page">
     <van-nav-bar :title="detail.stock ? `${detail.stock.name} ${detail.stock.code}` : '个股'"
-                 left-arrow @click-left="$router.back()" />
+                 left-arrow left-text="返回" @click-left="goBack" />
     <div ref="chartEl" style="width:100%;height:320px;"></div>
 
     <van-cell-group v-if="zone" inset title="当前状态">
@@ -40,10 +40,17 @@
 <script setup>
 import * as echarts from 'echarts'
 import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getStockDetail } from '../api'
 
 const route = useRoute()
+const router = useRouter()
+
+// 直接打开详情页（无 SPA 历史）时 router.back() 无效，兜底回股票池
+const goBack = () => {
+  if (window.history.state?.back) router.back()
+  else router.replace('/pool')
+}
 const chartEl = ref(null)
 const detail = ref({})
 const loading = ref(true)
