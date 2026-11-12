@@ -8,8 +8,9 @@ from datetime import datetime, time
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .db import SessionLocal
-from .services import datafeed, money_flow, safety_zone, screener, yaogu
-from .services.monitor import run_monitor_job
+from .services import (datafeed, money_flow, picks_track, safety_zone,
+                       screener, yaogu)
+from .services.monitor import run_digest_job, run_monitor_job
 
 log = logging.getLogger(__name__)
 
@@ -81,9 +82,15 @@ def setup_jobs() -> None:
                       hour=14, minute=0, id="intraday_run",
                       replace_existing=True, max_instances=1,
                       misfire_grace_time=1800)
-    # 交易日 15:40 收盘行情（增量补当日 bar，限速后约 60 分钟）
-    scheduler.add_job(lambda: _with_db(datafeed.sync_all_quotes, years=5),
+    # 交易日 15:40 收盘日线：一次全市场快照写入，避免逐只接口被限流
+    scheduler.add_job(lambda: _with_db(datafeed.sync_daily_bars_from_spot),
                       "cron", day_of_week="mon-fri", hour=15, minute=40,
+                      id="sync_daily_bars", replace_existing=True,
+                      max_instances=1, misfire_grace_time=3600)
+    # 15:45 逐只增量补漏（只修已有历史的缺口，正常为 0 只）
+    scheduler.add_job(lambda: _with_db(datafeed.sync_all_quotes, years=5,
+                                       only_existing=True),
+                      "cron", day_of_week="mon-fri", hour=15, minute=45,
                       id="sync_quotes", replace_existing=True,
                       max_instances=1, misfire_grace_time=3600)
     # 16:10 筛选 + 16:15 区间计算
@@ -100,6 +107,26 @@ def setup_jobs() -> None:
                       "cron", day_of_week="mon-fri", hour=16, minute=20,
                       id="sync_money_flow", replace_existing=True,
                       max_instances=1, misfire_grace_time=1800)
+    # 15:50 基准指数日线（1 只 1 请求，很快）
+    scheduler.add_job(lambda: _with_db(datafeed.sync_index_quotes),
+                      "cron", day_of_week="mon-fri", hour=15, minute=50,
+                      id="sync_index", replace_existing=True,
+                      max_instances=1, misfire_grace_time=3600)
+    # 16:25 选股快照落库（在 16:10 筛选、16:15 区间之后）
+    scheduler.add_job(lambda: _with_db(picks_track.save_snapshot),
+                      "cron", day_of_week="mon-fri", hour=16, minute=25,
+                      id="picks_snapshot", replace_existing=True,
+                      max_instances=1, misfire_grace_time=1800)
+    # 16:30 回填前向收益（T+5/10/20/60，已存在的不覆盖）
+    scheduler.add_job(lambda: _with_db(picks_track.update_forward_returns),
+                      "cron", day_of_week="mon-fri", hour=16, minute=30,
+                      id="update_fwd", replace_existing=True,
+                      max_instances=1, misfire_grace_time=1800)
+    # 16:45 低估观察汇总（仅跌破下沿、未满足右侧确认的标的合并一条）
+    scheduler.add_job(run_digest_job, "cron", day_of_week="mon-fri",
+                      hour=16, minute=45, id="zone_digest",
+                      replace_existing=True, max_instances=1,
+                      misfire_grace_time=1800)
     # 18:00 妖股快照落库（等 15:40 起的收盘行情同步跑完）
     scheduler.add_job(lambda: _with_db(yaogu.save_today_snapshot),
                       "cron", day_of_week="mon-fri", hour=18, minute=0,
@@ -144,14 +171,24 @@ def start() -> None:
     _SUN = {6}
 
     catch_up = [
-        ("sync_quotes",       time(15, 40), _WEEKDAY_ONLY,
-         lambda: _with_db(datafeed.sync_all_quotes, years=5)),
+        ("sync_daily_bars",   time(15, 40), _WEEKDAY_ONLY,
+         lambda: _with_db(datafeed.sync_daily_bars_from_spot)),
+        ("sync_quotes",       time(15, 45), _WEEKDAY_ONLY,
+         lambda: _with_db(datafeed.sync_all_quotes, years=5,
+                          only_existing=True)),
         ("screen",            time(16, 10), _WEEKDAY_ONLY,
          lambda: _with_db(screener.run_screen)),
         ("calc_zones",        time(16, 15), _WEEKDAY_ONLY,
          lambda: _with_db(safety_zone.calc_zones)),
         ("sync_money_flow",   time(16, 20), _WEEKDAY_ONLY,
          lambda: _with_db(money_flow.sync_money_flow)),
+        ("sync_index",        time(15, 50), _WEEKDAY_ONLY,
+         lambda: _with_db(datafeed.sync_index_quotes)),
+        ("picks_snapshot",    time(16, 25), _WEEKDAY_ONLY,
+         lambda: _with_db(picks_track.save_snapshot)),
+        ("update_fwd",        time(16, 30), _WEEKDAY_ONLY,
+         lambda: _with_db(picks_track.update_forward_returns)),
+        ("zone_digest",       time(16, 45), _WEEKDAY_ONLY, run_digest_job),
         ("intraday_run",      time(14, 0),  _WEEKDAY_ONLY, _intraday_chain),
         ("sync_fundamentals", time(9, 0),  _SAT,
          lambda: _with_db(datafeed.sync_all_fundamentals, years=5)),

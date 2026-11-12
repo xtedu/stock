@@ -222,22 +222,22 @@ def _enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-# 六维打分（满分 100）
+# 七维打分（满分 100）
 # --------------------------------------------------------------------------- #
 
 def _score_price(close: float) -> int:
-    """价格维度 20 分：≤5元 20；5-8 元 15；8-10 元 10；>10 元 5。"""
+    """价格维度 15 分：≤5元 15；5-8 元 11；8-10 元 7；>10 元 3。"""
     if close <= 5:
-        return 20
-    if close <= 8:
         return 15
+    if close <= 8:
+        return 11
     if close <= 10:
-        return 10
-    return 5
+        return 7
+    return 3
 
 
 def _score_amount(amount_yi: float) -> int:
-    """市值代理 20 分：成交额(亿) ∈ [5, 20] → 20；[1, 5) 或 (20, 50] → 15；其余 5。"""
+    """流通市值缺失时的成交额代理 20 分。"""
     if 5 <= amount_yi <= 20:
         return 20
     if (1 <= amount_yi < 5) or (20 < amount_yi <= 50):
@@ -245,8 +245,19 @@ def _score_amount(amount_yi: float) -> int:
     return 5
 
 
+def _score_float_mv(float_mv_yi: float) -> int:
+    """流通市值 20 分：20-60 亿 → 20；60-100 或 10-20 → 15；100-200 或 5-10 → 10；其余 5。"""
+    if 20 <= float_mv_yi <= 60:
+        return 20
+    if 60 < float_mv_yi <= 100 or 10 <= float_mv_yi < 20:
+        return 15
+    if 100 < float_mv_yi <= 200 or 5 <= float_mv_yi < 10:
+        return 10
+    return 5
+
+
 def _score_amplitude(amp: float) -> int:
-    """换手健康度代理 15 分：振幅 ∈ [0.05, 0.20] → 15；>0.20 → 10；<0.05 → 8。"""
+    """换手率缺失时的振幅代理 15 分。"""
     if amp >= 0.05 and amp <= 0.20:
         return 15
     if amp > 0.20:
@@ -254,13 +265,35 @@ def _score_amplitude(amp: float) -> int:
     return 8
 
 
-def _score_chip(limit_count_1y: float) -> int:
-    """筹码干净代理 15 分：年内涨停 ≤ 3 → 15；4-6 → 10；>6 → 5。"""
-    if limit_count_1y <= 3:
+def _score_turnover(turnover_rate: float) -> int:
+    """换手健康度 15 分：5%-20% → 15；20%-35% 或 3%-5% → 11；>35% → 6；<3% → 5。"""
+    if 5 <= turnover_rate <= 20:
         return 15
-    if limit_count_1y <= 6:
-        return 10
+    if 20 < turnover_rate <= 35 or 3 <= turnover_rate < 5:
+        return 11
+    if turnover_rate > 35:
+        return 6
     return 5
+
+
+def _score_seal_ratio(seal_ratio: float) -> int:
+    """封单额/流通市值 15 分：≥3% → 15；1%-3% → 11；0.3%-1% → 7；<0.3% → 3。"""
+    if seal_ratio >= 0.03:
+        return 15
+    if seal_ratio >= 0.01:
+        return 11
+    if seal_ratio >= 0.003:
+        return 7
+    return 3
+
+
+def _score_chip(limit_count_1y: float) -> int:
+    """筹码干净代理 10 分：年内涨停 ≤ 3 → 10；4-6 → 7；>6 → 3。"""
+    if limit_count_1y <= 3:
+        return 10
+    if limit_count_1y <= 6:
+        return 7
+    return 3
 
 
 def _score_position(ret20: float, is_open_board: bool) -> int:
@@ -280,14 +313,14 @@ def _score_position(ret20: float, is_open_board: bool) -> int:
 
 
 def _score_theme(industry_limit_count: int) -> int:
-    """题材纯度代理 20 分：行业今日涨停家数 ≥ 3 → 20；2 → 16；1 → 10。"""
+    """题材纯度 15 分：行业今日涨停家数 ≥ 3 → 15；2 → 12；1 → 7。"""
     if industry_limit_count >= 3:
-        return 20
+        return 15
     if industry_limit_count == 2:
-        return 16
+        return 12
     if industry_limit_count == 1:
-        return 10
-    return 5
+        return 7
+    return 3
 
 
 def _is_open_board(row: pd.Series) -> bool:
@@ -619,13 +652,23 @@ def _run_screen(db: Session, batch_date: date | None = None,
                           if row is not None
                           and not pd.isna(row["limit_count_1y"]) else 0.0)
 
+        # 真值优先：同花顺涨停池已给出流通市值 / 换手率 / 封单额，缺失才回落代理
+        float_mv = info.get("float_mv_yi")
+        turnover = info.get("turnover_rate")
+        seal_yi = info.get("seal_amount_yi")
+        seal_ratio = (seal_yi / float_mv) if (seal_yi is not None and float_mv) else None
+        fallback = float_mv is None or turnover is None
+
         s_price = _score_price(close)
-        s_amount = _score_amount(amount_yi)
+        s_fmv = (_score_float_mv(float(float_mv)) if float_mv is not None
+                 else _score_amount(amount_yi))
         s_theme = _score_theme(ind_cnt)
         s_chip = _score_chip(limit_count_1y)
-        s_amp = _score_amplitude(amplitude)
+        s_turn = (_score_turnover(float(turnover)) if turnover is not None
+                  else _score_amplitude(amplitude))
+        s_seal = _score_seal_ratio(seal_ratio) if seal_ratio is not None else 8
         s_pos = _score_position(ret20, is_open)
-        total = s_price + s_amount + s_theme + s_chip + s_amp + s_pos
+        total = (s_price + s_fmv + s_theme + s_chip + s_turn + s_seal + s_pos)
 
         # 八层漏斗打分门槛
         if total < 70:
@@ -644,9 +687,14 @@ def _run_screen(db: Session, batch_date: date | None = None,
             "limit_count_1y": int(limit_count_1y),
             "industry_limit_count": ind_cnt,
             "score": total,
-            "scores": {"price": s_price, "amount": s_amount,
+            "score_fallback": fallback,
+            "float_mv_yi": float_mv,
+            "turnover_rate": turnover,
+            "seal_amount_yi": seal_yi,
+            "scores": {"price": s_price, "float_mv": s_fmv,
                        "theme": s_theme, "chip": s_chip,
-                       "amplitude": s_amp, "position": s_pos},
+                       "turnover": s_turn, "seal": s_seal,
+                       "position": s_pos},
         })
 
     candidates.sort(key=lambda x: x["score"], reverse=True)

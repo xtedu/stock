@@ -2,8 +2,12 @@
   <div class="page">
     <van-nav-bar title="今日三只" left-arrow @click-left="goBack">
       <template #right>
-        <van-button size="mini" plain type="primary" :loading="loading"
-                    @click="load(true)">刷新</van-button>
+        <div class="nav-right">
+          <van-button size="mini" plain type="primary"
+                      @click="$router.push('/picks/perf')">绩效</van-button>
+          <van-button size="mini" plain type="primary" :loading="loading"
+                      @click="load(true)">刷新</van-button>
+        </div>
       </template>
     </van-nav-bar>
 
@@ -90,10 +94,18 @@
       </div>
     </div>
 
-    <div v-if="items.length" class="disclaimer">
-      该组合在 2025-02~2026-10 回测中：周频 20 日超额 +0.34pp（t=0.35），2026 年已接近市场平均。
-      市场与行业周期仅作环境提示：回测中行业趋势、行业资金流入、行业涨停热度作为门槛均为负贡献，
-      因此不参与筛选。页面内容不构成投资建议。
+    <div class="disclaimer">
+      <template v-if="perf && perf.summary">
+        前向跟踪自 {{ perf.summary.start }} 起，20 日非重叠样本
+        {{ perf.summary.effective_periods }} 期：胜率 {{ pct(perf.summary.win_rate) }}，
+        平均净超额 {{ signed(perf.summary.avg_excess_net) }}
+        （已扣双边 {{ perf.cost_round_trip_pct }}% 成本）。
+      </template>
+      <template v-else>
+        前向跟踪样本不足（需累计 20 个交易日才有 20 日收益），暂不披露胜率。
+      </template>
+      <span class="link" @click="$router.push('/picks/perf')">查看完整绩效 ›</span>
+      页面内容不构成投资建议。
     </div>
   </div>
 </template>
@@ -101,15 +113,17 @@
 <script setup>
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getPickContext, getPicks } from '../api'
+import { getPickContext, getPickPerformance, getPicks } from '../api'
 
 const router = useRouter()
 const items = ref([])
 const ctx = ref(null)
+const perf = ref(null)
 const loading = ref(false)
 const loadedAt = ref(0)
 
 const fmt = (v) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))
+const pct = (v) => (v === null || v === undefined ? '—' : `${Number(v).toFixed(2)}%`)
 const signed = (v) => {
   if (v === null || v === undefined) return '—'
   return `${v > 0 ? '+' : ''}${Number(v).toFixed(2)}`
@@ -136,12 +150,14 @@ async function load(refresh = false) {
   if (loading.value) return
   loading.value = true
   try {
-    const [p, c] = await Promise.all([
+    const [p, c, pf] = await Promise.all([
       getPicks(3, refresh),
-      getPickContext().catch(() => null)
+      getPickContext().catch(() => null),
+      getPickPerformance('000852', 20).catch(() => null)
     ])
     items.value = p
     if (c) ctx.value = c
+    if (pf) perf.value = pf
     loadedAt.value = Date.now()
   } finally {
     loading.value = false
@@ -311,10 +327,18 @@ onActivated(() => {
   gap: 6px;
   margin-top: 10px;
 }
+.nav-right {
+  display: flex;
+  gap: 6px;
+}
 .disclaimer {
   margin: 16px 14px 0;
   font-size: 11px;
   line-height: 1.6;
   color: #969799;
+}
+.link {
+  color: #1989fa;
+  margin: 0 4px;
 }
 </style>

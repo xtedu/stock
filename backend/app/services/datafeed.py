@@ -8,18 +8,18 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import akshare as ak
 import numpy as np
 import pandas as pd
 import requests
-from sqlalchemy import func, update
+from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from ..models import (DailyQuote, FinIndicator, IntradaySpot, Stock,
-                      ValuationDaily, is_bj_code)
+from ..models import (DailyQuote, FinIndicator, IndexDaily, IntradaySpot,
+                      Stock, ValuationDaily, is_bj_code)
 
 log = logging.getLogger(__name__)
 
@@ -161,13 +161,16 @@ def _upsert_quotes(db: Session, code: str, df: pd.DataFrame) -> int:
 
 
 def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
-                    limit: int | None = None) -> dict:
-    """全市场日线增量同步（限速 + 熔断，东财优先、失败降级新浪）。
+                    limit: int | None = None,
+                    only_existing: bool = False) -> dict:
+    """全市场日线增量同步（限速 + 熔断，东财优先、失败降级腾讯）。
 
     - 只补 latest_date 之后的新 bar（新股才拉 years 年历史窗口），请求量极小
     - 并发默认 2，每笔请求后随机 sleep 0.3-0.8s
     - 连续失败 25 次判定数据源不可用，直接中止本次任务（不再反复撞击）
     - 北交所（4/8/92 开头）全链路排除，本项目只处理沪深
+    - only_existing=True 时只修「已有历史」的增量缺口，不拉全历史；
+      当日全市场 bar 由 sync_daily_bars_from_spot 一次性写入，正常情况这里是空跑
     """
     total = sync_stock_list(db)
     codes = [c for (c,) in db.query(Stock.code).all()]
@@ -178,10 +181,13 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
     today = date.today()
     stale = [c for c in codes if latest.get(c) is None or latest[c] < today]
     todo = [c for c in stale if not is_bj_code(c)]
+    if only_existing:
+        todo = [c for c in todo if latest.get(c) is not None]
+    skipped = len(codes) - len(todo)
     if limit:
         todo = todo[:limit]
-    log.info("quotes sync: %d total, %d todo (北交所 %d 只跳过)",
-             len(codes), len(todo), len(stale) - len(todo))
+    log.info("quotes sync: %d total, %d todo (北交所/无历史 %d 只跳过)",
+             len(codes), len(todo), skipped)
     if not todo:
         return {"stocks": total, "fetched": 0, "rows": 0, "source": "-"}
 
@@ -264,6 +270,86 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
             "eastmoney": use_em, "coverage": round(cov_pct, 1)}
 
 
+# ---------- 指数日线（基准） ----------
+
+INDEX_CODES = {"000300": "沪深300", "000905": "中证500", "000852": "中证1000"}
+
+
+def _fetch_index(code: str, start: str, end: str) -> tuple[pd.DataFrame | None, str]:
+    """东财指数历史优先，失败降级 stock_zh_index_daily_em（全历史本地裁剪）。"""
+    try:
+        df = ak.index_zh_a_hist(symbol=code, period="daily",
+                                start_date=start, end_date=end)
+        if df is not None and not df.empty:
+            return df, "eastmoney"
+    except Exception as e:
+        log.warning("index_zh_a_hist failed %s: %s", code, str(e)[:80])
+    prefix = "sh" if code.startswith("00") else "sz"
+    df = ak.stock_zh_index_daily_em(symbol=prefix + code)
+    return df, "em_daily"
+
+
+def _index_rows(df: pd.DataFrame, start: date) -> list[dict]:
+    """把两种接口的列名统一成 (date, close, pct_chg)。"""
+    if df is None or df.empty:
+        return []
+    if "日期" in df.columns:
+        dates = pd.to_datetime(df["日期"], errors="coerce")
+        closes = df["收盘"].map(_f)
+        pcts = (df["涨跌幅"].map(_f) if "涨跌幅" in df.columns
+                else pd.Series([None] * len(df)))
+    else:
+        dates = pd.to_datetime(df["date"], errors="coerce")
+        closes = df["close"].map(_f)
+        pcts = pd.Series([None] * len(df))
+    rows = []
+    for d, c, p in zip(dates, closes, pcts):
+        if pd.isna(d) or c is None:
+            continue
+        day = d.date()
+        if day < start:
+            continue
+        rows.append({"trade_date": day, "close": c, "pct_chg": p})
+    return rows
+
+
+def sync_index_quotes(db: Session, years: int = 5) -> dict:
+    """同步基准指数日线（增量）。单只失败只记 warning，不中断。"""
+    today = date.today()
+    done: dict[str, int] = {}
+    for code in INDEX_CODES:
+        try:
+            latest = db.query(func.max(IndexDaily.trade_date)).filter(
+                IndexDaily.code == code).scalar()
+            start = (latest + timedelta(days=1) if latest
+                     else today - timedelta(days=years * 365))
+            if start > today:
+                done[code] = 0
+                continue
+            df, src = _fetch_index(code, start.strftime("%Y%m%d"),
+                                   today.strftime("%Y%m%d"))
+            rows = [{"code": code, **r} for r in _index_rows(df, start)]
+            if not rows:
+                log.warning("index %s no rows (source=%s)", code, src)
+                done[code] = 0
+                continue
+            stmt = insert(IndexDaily).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["code", "trade_date"],
+                set_={"close": stmt.excluded.close,
+                      "pct_chg": stmt.excluded.pct_chg},
+            )
+            db.execute(stmt)
+            db.commit()
+            done[code] = len(rows)
+        except Exception as e:
+            db.rollback()
+            log.warning("index sync failed %s: %s", code, str(e)[:120])
+            done[code] = 0
+    log.info("index quotes synced: %s", done)
+    return {"indexes": done}
+
+
 # ---------- 盘中全市场快照 ----------
 
 def _fetch_spot_em() -> pd.DataFrame:
@@ -278,26 +364,25 @@ def _fetch_spot_sina() -> pd.DataFrame:
     return df
 
 
-def fetch_spot_bars() -> pd.DataFrame | None:
-    """盘中全市场快照 → 标准化 OHLCV（只读，不落库）。
-
-    东财优先、新浪降级，失败返回 None。供妖股盘中模式拼当日临时 K 线。
-    """
+def _spot_bars() -> tuple[pd.DataFrame | None, str]:
+    """全市场快照 → 标准化 OHLCV（只读，不落库），返回 (df, 数据源)。"""
     col_map = {"代码": "code", "今开": "open", "最高": "high", "最低": "low",
                "最新价": "close", "成交量": "volume", "成交额": "amount",
                "涨跌幅": "pct_chg"}
     try:
         df = _fetch_spot_em()
+        src = "eastmoney"
     except Exception as e:  # noqa: BLE001
         log.warning("eastmoney spot unavailable, fallback to sina: %s",
                     str(e)[:80])
         try:
             df = _retry(_fetch_spot_sina)
+            src = "sina"
         except Exception as e2:  # noqa: BLE001
             log.error("spot fetch failed: %s", str(e2)[:80])
-            return None
+            return None, "fail"
     if df is None or df.empty or "代码" not in df.columns:
-        return None
+        return None, src
     keep = {k: v for k, v in col_map.items() if k in df.columns}
     out = df[list(keep)].rename(columns=keep)
     for c in out.columns:
@@ -311,7 +396,82 @@ def fetch_spot_bars() -> pd.DataFrame | None:
     for c in ("open", "high", "low", "volume", "amount", "pct_chg"):
         if c not in out.columns:
             out[c] = np.nan
-    return out.reset_index(drop=True)
+    if src == "sina":
+        # 新浪快照成交量单位是「股」，统一成「手」与东财/历史接口一致
+        out["volume"] = out["volume"] / 100.0
+    return out.reset_index(drop=True), src
+
+
+def fetch_spot_bars() -> pd.DataFrame | None:
+    """盘中全市场快照 → 标准化 OHLCV（只读，不落库）。
+
+    东财优先、新浪降级，失败返回 None。供妖股盘中模式拼当日临时 K 线。
+    """
+    return _spot_bars()[0]
+
+
+_CST = timezone(timedelta(hours=8))
+
+
+def sync_daily_bars_from_spot(db: Session) -> dict:
+    """收盘后用**一次**全市场快照写入当日日线。
+
+    逐只历史接口（5000+ 次请求）在收盘后被东财限流时会整批失败，
+    这里改成 1 次快照请求，覆盖所有已有历史的代码：
+    - 只写已有历史 bar 的代码，避免只有单日 bar 的股票把涨跌家数统计拉偏
+    - 15:00 前不写（快照还是盘中价，不是收盘价）
+    - 节假日守卫：与上一根 bar 价格几乎完全一致时判定为休市，不写入
+    """
+    if datetime.now(_CST).hour < 15:
+        return {"rows": 0, "reason": "before close (15:00 CST)"}
+    df, src = _spot_bars()
+    if df is None or df.empty:
+        return {"rows": 0, "source": src, "reason": "spot unavailable"}
+
+    today = date.today()
+    last = {code: float(close) for code, close in db.execute(text(
+        "SELECT DISTINCT ON (code) code, close FROM daily_quotes "
+        "WHERE trade_date < :d AND close IS NOT NULL "
+        "ORDER BY code, trade_date DESC"), {"d": today}).all()}
+
+    rows, same = [], 0
+    for _, r in df.iterrows():
+        code = r["code"]
+        prev = last.get(code)
+        if prev is None:
+            continue
+        close = _f(r.get("close"))
+        if not close or close <= 0:
+            continue
+        if abs(prev - close) < 1e-6:
+            same += 1
+        vol = _f(r.get("volume"))
+        rows.append({
+            "code": code, "trade_date": today,
+            "open": _f(r.get("open")), "high": _f(r.get("high")),
+            "low": _f(r.get("low")), "close": close,
+            "volume": int(vol) if vol is not None else None,
+            "amount": _f(r.get("amount")),
+        })
+    if not rows:
+        return {"rows": 0, "source": src, "reason": "no tracked code in spot"}
+    if same / len(rows) >= 0.9:
+        log.info("daily bars from spot: %.0f%% identical to last session, "
+                 "skip (non-trading day)", same / len(rows) * 100)
+        return {"rows": 0, "source": src, "reason": "no new session"}
+
+    stmt = insert(DailyQuote).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["code", "trade_date"],
+        set_={"open": stmt.excluded.open, "high": stmt.excluded.high,
+              "low": stmt.excluded.low, "close": stmt.excluded.close,
+              "volume": stmt.excluded.volume, "amount": stmt.excluded.amount},
+    )
+    db.execute(stmt)
+    db.commit()
+    log.info("daily bars from spot: %d rows (source=%s, %s)",
+             len(rows), src, today)
+    return {"rows": len(rows), "source": src, "trade_date": str(today)}
 
 
 def sync_spot_snapshot(db: Session) -> int:

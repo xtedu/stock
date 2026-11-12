@@ -57,6 +57,76 @@ class PickOut(BaseModel):
     tags: list[str] = []                  # 提示标签（仅展示，不参与筛选）
 
 
+class PickSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    batch_date: date
+    code: str
+    rank: int | None = None
+    score: float | None = None
+    close: float | None = None
+    industry: str | None = None
+    profit_growth: float | None = None
+    revenue_growth: float | None = None
+    roe_avg: float | None = None
+    debt_ratio: float | None = None
+    zone_low: float | None = None
+    zone_high: float | None = None
+    zone_status: str | None = None
+    ma20_slope_up: bool | None = None
+    ret20: float | None = None
+    ret60: float | None = None
+    tags: list[str] = []
+    source: str | None = None
+    fwd_ret_5: float | None = None
+    fwd_ret_10: float | None = None
+    fwd_ret_20: float | None = None
+    fwd_ret_60: float | None = None
+
+
+class PickHistoryDayOut(BaseModel):
+    batch_date: date
+    items: list[PickSnapshotOut] = []
+
+
+class PerfPointOut(BaseModel):
+    date: str
+    strategy: float | None = None
+    bench: float | None = None
+    excess: float | None = None
+
+
+class PerfSummaryOut(BaseModel):
+    raw_periods: int
+    effective_periods: int
+    start: str | None = None
+    end: str | None = None
+    win_rate: float | None = None
+    avg_excess_gross: float | None = None
+    avg_excess_net: float | None = None
+    avg_port: float | None = None
+    avg_bench: float | None = None
+    avg_win: float | None = None
+    avg_loss: float | None = None
+    payoff: float | None = None
+    cum_strategy: float | None = None
+    cum_bench: float | None = None
+    cum_excess_net: float | None = None
+    max_drawdown: float | None = None
+    t_stat: float | None = None
+    t_note: str | None = None
+
+
+class PerfOut(BaseModel):
+    benchmark: str
+    benchmark_name: str
+    window: int
+    cost_round_trip_pct: float | None = None
+    summary: PerfSummaryOut | None = None
+    curve: list[PerfPointOut] = []
+    reason: str | None = None
+
+
 class SafetyZoneOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

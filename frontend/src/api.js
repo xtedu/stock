@@ -21,6 +21,11 @@ export const getPicks = (limit = 3, refresh = false) =>
   api.get('/api/picks', { params: { limit, refresh }, timeout: 60000 }).then(r => r.data)
 export const getPickContext = () =>
   api.get('/api/picks/context', { timeout: 60000 }).then(r => r.data)
+// 选股落库历史与前向绩效（非重叠样本、含双边成本）
+export const getPickHistory = (days = 60) =>
+  api.get('/api/picks/history', { params: { days } }).then(r => r.data)
+export const getPickPerformance = (benchmark = '000852', window = 20) =>
+  api.get('/api/picks/performance', { params: { benchmark, window }, timeout: 60000 }).then(r => r.data)
 export const getStockDetail = (code) => api.get(`/api/zones/${code}`).then(r => r.data)
 export const getAlertLogs = () => api.get('/api/alerts/logs').then(r => r.data)
 export const getAlertRules = () => api.get('/api/alerts/rules').then(r => r.data)
@@ -36,8 +41,11 @@ export const getCompareHistory = (limit = 20) =>
 export const getCompareDetail = (id) => api.get(`/api/compare/${id}`).then(r => r.data)
 
 // ===== 数据任务（手动触发） =====
-export const syncQuotes = (years = 5) =>
-  jobApi.post('/api/jobs/sync-quotes', null, { params: { years } }).then(r => r.data)
+export const syncQuotes = (years = 5, onlyExisting = false) =>
+  jobApi.post('/api/jobs/sync-quotes', null,
+    { params: { years, only_existing: onlyExisting } }).then(r => r.data)
+// 收盘日线：一次全市场快照写入当日 bar（不逐只请求，抗限流）
+export const syncDailyBars = () => jobApi.post('/api/jobs/daily-bars').then(r => r.data)
 export const syncFundamentals = (years = 5) =>
   jobApi.post('/api/jobs/sync-fundamentals', null, { params: { years } }).then(r => r.data)
 export const runScreen = () => jobApi.post('/api/jobs/screen').then(r => r.data)
@@ -47,6 +55,13 @@ export const runMonitor = () => jobApi.post('/api/jobs/monitor').then(r => r.dat
 // 资金流同步：intraday=true 取盘中累计值，false 取收盘官方数据
 export const syncMoneyFlow = (intraday = false) =>
   jobApi.post('/api/jobs/money-flow', null, { params: { intraday } }).then(r => r.data)
+// 选股评估链路：基准指数 / 快照落库 / 历史回填 / 前向收益
+export const syncIndex = (years = 5) =>
+  jobApi.post('/api/jobs/sync-index', null, { params: { years } }).then(r => r.data)
+export const savePicksSnapshot = () => jobApi.post('/api/jobs/picks-snapshot').then(r => r.data)
+export const backfillPicks = (days = 250) =>
+  jobApi.post('/api/jobs/picks-backfill', null, { params: { days } }).then(r => r.data)
+export const updateForwardReturns = () => jobApi.post('/api/jobs/update-fwd').then(r => r.data)
 
 // 妖股筛选（refresh=true 跳过服务端 120s 缓存）
 export const getYaogu = (limit = 50, refresh = false) =>

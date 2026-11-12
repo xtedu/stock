@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal, get_db
-from ..services import (datafeed, money_flow, monitor, safety_zone, screener,
-                        yaogu)
+from ..services import (datafeed, money_flow, monitor, picks_track,
+                        safety_zone, screener, yaogu)
 from ..services.datafeed import sync_spot_snapshot
 from ..scheduler import _acquire, _with_db
 
@@ -62,15 +62,19 @@ def job_status():
 
 @router.post("/sync-quotes")
 def sync_quotes(years: int = 5, limit: int | None = None,
-                db: Session = Depends(get_db)):
+                only_existing: bool = False, db: Session = Depends(get_db)):
     # **不用** handler 注入的 db，后台线程自己 SessionLocal()
-    if limit is not None:
-        return _run_async("sync_quotes",
-                          lambda: _with_db(datafeed.sync_all_quotes,
-                                           years=years, limit=limit))
     return _run_async("sync_quotes",
-                      lambda: _with_db(datafeed.sync_all_quotes,
-                                       years=years))
+                      lambda: _with_db(datafeed.sync_all_quotes, years=years,
+                                       limit=limit,
+                                       only_existing=only_existing))
+
+
+@router.post("/daily-bars")
+def daily_bars(db: Session = Depends(get_db)):
+    """收盘后用一次全市场快照写入当日日线（不逐只请求，抗限流）。"""
+    return _run_async("daily_bars",
+                      lambda: _with_db(datafeed.sync_daily_bars_from_spot))
 
 
 @router.post("/sync-fundamentals")
@@ -132,6 +136,36 @@ def sync_money_flow(intraday: bool = False, db: Session = Depends(get_db)):
 @router.post("/monitor")
 def monitor_now(db: Session = Depends(get_db)):
     return monitor.check_and_notify(db)
+
+
+@router.post("/sync-index")
+def sync_index(years: int = 5, db: Session = Depends(get_db)):
+    """同步沪深300/中证500/中证1000 基准日线。"""
+    return _run_async("sync_index",
+                      lambda: _with_db(datafeed.sync_index_quotes, years=years))
+
+
+@router.post("/picks-snapshot")
+def picks_snapshot(limit: int = 3, db: Session = Depends(get_db)):
+    """把当日选股结果落库（官方快照）。"""
+    return _run_async("picks_snapshot",
+                      lambda: _with_db(picks_track.save_snapshot, limit=limit))
+
+
+@router.post("/picks-backfill")
+def picks_backfill(days: int = 250, limit: int = 3,
+                   db: Session = Depends(get_db)):
+    """按历史交易日重算并落库选股快照（避免前视偏差，仍含幸存者偏差）。"""
+    return _run_async("picks_backfill",
+                      lambda: _with_db(picks_track.backfill_snapshots,
+                                       days=days, limit=limit))
+
+
+@router.post("/update-fwd")
+def update_fwd(db: Session = Depends(get_db)):
+    """回填选股快照的 T+5/10/20/60 前向收益。"""
+    return _run_async("update_fwd",
+                      lambda: _with_db(picks_track.update_forward_returns))
 
 
 @router.post("/yaogu-snapshot")

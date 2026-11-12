@@ -10,6 +10,7 @@ export default createRouter({
     { path: '/', component: () => import('../views/Stocks.vue') },
     { path: '/pool', component: () => import('../views/Pool.vue') },
     { path: '/picks', component: () => import('../views/Picks.vue') },
+    { path: '/picks/perf', component: () => import('../views/PicksPerf.vue') },
     { path: '/yaogu', component: () => import('../views/Yaogu.vue') },
     { path: '/yaogu/history', component: () => import('../views/YaoguHistory.vue') },
     { path: '/news', component: () => import('../views/News.vue') },

@@ -220,6 +220,56 @@ class CalendarEvent(Base):
                                                  server_default=func.now())
 
 
+class IndexDaily(Base):
+    """指数日线（基准用）：沪深300 / 中证500 / 中证1000。"""
+    __tablename__ = "index_daily"
+    __table_args__ = (UniqueConstraint("code", "trade_date"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10))
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    close: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    pct_chg: Mapped[float | None] = mapped_column(Numeric(10, 4))
+
+
+class PickSnapshot(Base):
+    """每日选股落库：策略评估与前向收益跟踪的底表。
+
+    同一 (batch_date, code) 只保留一条，收盘官方快照覆盖回填记录。
+    """
+    __tablename__ = "picks"
+    __table_args__ = (UniqueConstraint("batch_date", "code",
+                                       name="uq_picks_date_code"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    batch_date: Mapped[date] = mapped_column(Date, index=True)
+    code: Mapped[str] = mapped_column(String(10), index=True)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    close: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    industry: Mapped[str | None] = mapped_column(String(50))
+    profit_growth: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    revenue_growth: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    roe_avg: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    debt_ratio: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    zone_low: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    zone_high: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    zone_status: Mapped[str | None] = mapped_column(String(10))
+    ma20_slope_up: Mapped[bool | None] = mapped_column(Boolean)
+    ret20: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    ret60: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    tags: Mapped[list | None] = mapped_column(JSONB)
+    source: Mapped[str | None] = mapped_column(String(10))   # backfill / official
+    fwd_ret_5: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    fwd_ret_10: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    fwd_ret_20: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    fwd_ret_60: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
 class YaoguSnapshot(Base):
     """妖股/涨停池每日快照（一个交易日 × 一只涨停股一行）。
 

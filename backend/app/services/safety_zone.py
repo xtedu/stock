@@ -1,11 +1,13 @@
 """安全区间计算：以中期价值中枢（MA250）为锚的价格区间。
 
-原「三法融合取交集」存在结构性缺陷：技术支撑法下沿 max(MA250, 布林下轨)
-天然高于价格分位带上沿，导致交集恒为空、大面积退化为价格分位带。现改为：
+带宽改为**个股自适应**：取近5年「收盘价 / MA250 − 1」的 10 / 90 分位作为
+上下带宽，再裁剪到 [4%, 20%]。固定 ±10% 会把 55% 以上的股票判为低估，
+分位法按构造只让约 10% 的历史区间落在下沿之下。
 
-- 中枢锚：以 MA250 为价值中枢，区间 = [中枢×0.90, 中枢×1.10]
-- 估值压缩：当前 PE 近5年分位 >= 70%（偏贵）时，上沿压缩到中枢，即 [0.90×中枢, 中枢]
+- 中枢锚：MA250，区间 = [中枢×(1−lo), 中枢×(1+hi)]
+- 估值压缩：当前 PE 近5年分位 >= 70%（偏贵）时，上沿压缩到中枢
 - 预警线：布林下轨（MA20 − 2σ20），跌破视为深度低估的加仓参考
+- 右侧信号：detail 里附 MA20 斜率与相对基准 20 日超额，供提醒分级使用
 
 估值分位带、价格分位带仅作 detail 展示，不参与区间取交集。
 """
@@ -15,14 +17,18 @@ from datetime import date
 import numpy as np
 from sqlalchemy.orm import Session
 
-from ..models import DailyQuote, IntradaySpot, SafetyZone, StockPool, ValuationDaily
+from ..models import (DailyQuote, IndexDaily, IntradaySpot, SafetyZone,
+                      StockPool, ValuationDaily)
 from .screener import _pe_percentile
 
 log = logging.getLogger(__name__)
 
-ZONE_LOW_RATIO = 0.90    # 下沿 = 中枢 × 0.90
-ZONE_HIGH_RATIO = 1.10   # 上沿 = 中枢 × 1.10
+BAND_LO_PCT = 10.0       # 偏离分布 10 分位 → 下沿带宽
+BAND_HI_PCT = 90.0       # 偏离分布 90 分位 → 上沿带宽
+MIN_BAND = 0.04          # 带宽下限 4%
+MAX_BAND = 0.20          # 带宽上限 20%
 PE_HIGH_PCT = 70.0       # PE 5年分位高于该值视为偏贵，压缩上沿至中枢
+BENCHMARK = "000852"     # 相对强度基准：中证1000
 
 
 def _closes(db: Session, code: str, days: int) -> list[float]:
@@ -32,6 +38,45 @@ def _closes(db: Session, code: str, days: int) -> list[float]:
     closes = [float(r[0]) for r in rows]
     closes.reverse()
     return closes
+
+
+def _band_pct(closes: list[float]) -> tuple[float, float]:
+    """近5年「收盘 / MA250 − 1」的 10/90 分位，作为上下带宽（小数）。"""
+    if len(closes) < 250:
+        return 0.10, 0.10
+    arr = np.asarray(closes, dtype=float)
+    csum = np.cumsum(np.insert(arr, 0, 0.0))
+    ma = (csum[250:] - csum[:-250]) / 250.0
+    dev = arr[249:] / ma - 1.0
+    dev = dev[np.isfinite(dev)]
+    if len(dev) < 250:
+        return 0.10, 0.10
+    lo = -float(np.percentile(dev, BAND_LO_PCT))
+    hi = float(np.percentile(dev, BAND_HI_PCT))
+    return (min(max(lo, MIN_BAND), MAX_BAND),
+            min(max(hi, MIN_BAND), MAX_BAND))
+
+
+def _vol250(closes: list[float]) -> float | None:
+    """近250日年化波动率（百分数）。"""
+    if len(closes) < 60:
+        return None
+    arr = np.asarray(closes[-251:], dtype=float)
+    rets = np.diff(arr) / arr[:-1]
+    return round(float(np.std(rets) * np.sqrt(250) * 100), 2)
+
+
+def _benchmark_ret20(db: Session) -> float | None:
+    """基准指数近 20 个交易日收益（百分数），无数据返回 None。"""
+    rows = (db.query(IndexDaily.close)
+            .filter(IndexDaily.code == BENCHMARK,
+                    IndexDaily.close.isnot(None))
+            .order_by(IndexDaily.trade_date.desc()).limit(21).all())
+    closes = [float(r[0]) for r in rows]
+    if len(closes) < 21 or closes[-1] <= 0:
+        return None
+    closes.reverse()
+    return round((closes[-1] / closes[0] - 1) * 100, 2)
 
 
 def _implied_band(closes: list[float], vals: list[float],
@@ -97,7 +142,8 @@ def _cur_pe_override(db: Session, code: str, px: float,
 
 
 def _calc_one(db: Session, code: str, calc_date: date,
-              intraday: bool = False) -> dict | None:
+              intraday: bool = False,
+              bench_ret20: float | None = None) -> dict | None:
     closes = _closes(db, code, 1249)  # ≈5年
     if len(closes) < 250:
         return None
@@ -124,8 +170,12 @@ def _calc_one(db: Session, code: str, calc_date: date,
     ma20_slope_up = ma20_slope_pct > 0.0         # 短期均线拐头向上
 
     center = round(ma250, 2)
-    zone_low = round(center * ZONE_LOW_RATIO, 2)
-    zone_high = round(center * ZONE_HIGH_RATIO, 2)
+    band_lo, band_hi = _band_pct(closes)
+    zone_low = round(center * (1 - band_lo), 2)
+    zone_high = round(center * (1 + band_hi), 2)
+    ret20 = round((closes[-1] / closes[-21] - 1) * 100, 2) if closes[-21] else None
+    ret20_rel = (round(ret20 - bench_ret20, 2)
+                 if ret20 is not None and bench_ret20 is not None else None)
 
     val_band = _valuation_band(db, code, closes)
     price_band = _price_band(closes)
@@ -153,6 +203,12 @@ def _calc_one(db: Session, code: str, calc_date: date,
               "ma20": round(ma20, 2), "ma20_slope": round(ma20_slope, 4),
               "ma20_slope_pct": round(ma20_slope_pct, 4),
               "ma20_slope_up": ma20_slope_up,
+              "band_lo_pct": round(band_lo * 100, 2),
+              "band_hi_pct": round(band_hi * 100, 2),
+              "band_mode": "dev_percentile",
+              "vol250": _vol250(closes),
+              "ret20": ret20, "ret20_rel": ret20_rel,
+              "benchmark": BENCHMARK if bench_ret20 is not None else None,
               "used": used,
               "source": "intraday" if intraday else "official"}
 
@@ -167,11 +223,13 @@ def calc_zones(db: Session, calc_date: date | None = None,
     codes = [c for (c,) in db.query(StockPool.code)
              .filter(StockPool.active.is_(True)).all()]
     done = skipped = 0
+    bench_ret20 = _benchmark_ret20(db)   # 只算一次，避免逐只股票查基准
     # 同日重算：先清当日旧记录再插入
     db.query(SafetyZone).filter(SafetyZone.calc_date == calc_date).delete()
     for code in codes:
         try:
-            z = _calc_one(db, code, calc_date, intraday=intraday)
+            z = _calc_one(db, code, calc_date, intraday=intraday,
+                          bench_ret20=bench_ret20)
         except Exception as e:
             log.warning("zone calc failed %s: %s", code, e)
             z = None

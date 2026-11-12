@@ -9,12 +9,14 @@
 """
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from .finutil import avail_date
 
 log = logging.getLogger(__name__)
 
@@ -29,23 +31,17 @@ MIN_AMOUNT = 1e8
 MIN_HISTORY = 750
 
 
-def _avail_date(rd: date) -> date:
-    """报告期 → 法定披露截止日，避免用到未披露的财报。"""
-    md = (rd.month, rd.day)
-    if md == (3, 31):
-        return date(rd.year, 4, 30)
-    if md == (6, 30):
-        return date(rd.year, 8, 31)
-    if md == (9, 30):
-        return date(rd.year, 10, 31)
-    if md == (12, 31):
-        return date(rd.year + 1, 4, 30)
-    return rd + timedelta(days=120)
+def _ld_sql(as_of: date | None) -> tuple[str, dict]:
+    """用于 CTE 的「基准交易日」：指定 as_of 时用它，否则取全库最新。"""
+    if as_of:
+        return "SELECT CAST(:as_of AS date) AS d", {"as_of": as_of}
+    return "SELECT max(trade_date) AS d FROM daily_quotes", {}
 
 
-def _load_features(db: Session) -> pd.DataFrame:
-    sql = text("""
-        WITH ld AS (SELECT max(trade_date) AS d FROM daily_quotes),
+def _load_features(db: Session, as_of: date | None = None) -> pd.DataFrame:
+    ld, params = _ld_sql(as_of)
+    sql = text(f"""
+        WITH ld AS ({ld}),
         b AS (
           SELECT q.code, q.trade_date, q.close::float8 AS close,
                  q.amount::float8 AS amount,
@@ -67,7 +63,7 @@ def _load_features(db: Session) -> pd.DataFrame:
                amt20, trade_date
         FROM b2 WHERE trade_date = (SELECT d FROM ld)
     """)
-    rows = db.execute(sql).mappings().all()
+    rows = db.execute(sql, params).mappings().all()
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -81,12 +77,14 @@ def _load_features(db: Session) -> pd.DataFrame:
     return df
 
 
-def _load_history(db: Session) -> pd.DataFrame:
-    sql = text("""
+def _load_history(db: Session, as_of: date | None = None) -> pd.DataFrame:
+    where, params = ("WHERE trade_date <= :as_of", {"as_of": as_of}) if as_of \
+        else ("", {})
+    sql = text(f"""
         SELECT code, count(*) AS hist, max(trade_date) AS last_date
-        FROM daily_quotes GROUP BY code
+        FROM daily_quotes {where} GROUP BY code
     """)
-    df = pd.DataFrame(db.execute(sql).mappings().all())
+    df = pd.DataFrame(db.execute(sql, params).mappings().all())
     if not df.empty:
         df["last_date"] = pd.to_datetime(df["last_date"])
     return df
@@ -103,7 +101,7 @@ def _load_fin(db: Session, today: date) -> pd.DataFrame:
     for c in ("roe", "revenue_yoy", "profit_yoy", "debt_ratio", "np_deducted"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["report_date"] = pd.to_datetime(df["report_date"])
-    df["avail"] = df["report_date"].dt.date.map(_avail_date)
+    df["avail"] = df["report_date"].dt.date.map(avail_date)
     df = df[df["avail"] <= today]
     if df.empty:
         return df
@@ -127,13 +125,16 @@ def _load_fin(db: Session, today: date) -> pd.DataFrame:
     return agg
 
 
-def _load_heat(db: Session) -> dict[str, int]:
-    sql = text("""
-        WITH q AS (
+def _load_heat(db: Session, as_of: date | None = None) -> dict[str, int]:
+    ld, params = _ld_sql(as_of)
+    sql = text(f"""
+        WITH ld AS ({ld}),
+        q AS (
           SELECT code, trade_date, close,
                  lag(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev
           FROM daily_quotes
-          WHERE trade_date >= (SELECT max(trade_date) FROM daily_quotes) - INTERVAL '20 days'
+          WHERE trade_date >= (SELECT d FROM ld) - INTERVAL '20 days'
+            AND trade_date <= (SELECT d FROM ld)
         ),
         l AS (
           SELECT code, trade_date, close / NULLIF(prev, 0) - 1 AS chg,
@@ -141,7 +142,7 @@ def _load_heat(db: Session) -> dict[str, int]:
                       THEN 0.195 ELSE 0.095 END AS rate
           FROM q
         ),
-        d3 AS (SELECT DISTINCT trade_date FROM daily_quotes
+        d3 AS (SELECT DISTINCT trade_date FROM q
                ORDER BY trade_date DESC LIMIT 3)
         SELECT s.industry, count(*)::int AS n
         FROM l JOIN stocks s ON s.code = l.code
@@ -149,21 +150,27 @@ def _load_heat(db: Session) -> dict[str, int]:
           AND l.chg >= l.rate - 0.005
         GROUP BY s.industry
     """)
-    return {r[0]: int(r[1]) for r in db.execute(sql).all() if r[0]}
+    return {r[0]: int(r[1]) for r in db.execute(sql, params).all() if r[0]}
 
 
-def _load_zones(db: Session) -> dict[str, tuple[float | None, float | None]]:
-    sql = text("""
+def _load_zones(db: Session,
+                as_of: date | None = None) -> dict[str, tuple[float | None, float | None]]:
+    where, params = ("WHERE calc_date <= :as_of", {"as_of": as_of}) if as_of \
+        else ("", {})
+    sql = text(f"""
         SELECT DISTINCT ON (code) code, zone_low, zone_high
-        FROM safety_zones ORDER BY code, calc_date DESC
+        FROM safety_zones {where} ORDER BY code, calc_date DESC
     """)
     return {r[0]: (float(r[1]) if r[1] is not None else None,
                    float(r[2]) if r[2] is not None else None)
-            for r in db.execute(sql).all()}
+            for r in db.execute(sql, params).all()}
 
 
-def compute_picks(db: Session, limit: int = 3, refresh: bool = False) -> list[dict]:
-    latest = db.execute(text("SELECT max(trade_date) FROM daily_quotes")).scalar()
+def compute_picks(db: Session, limit: int = 3, refresh: bool = False,
+                  as_of: date | None = None) -> list[dict]:
+    """as_of 指定后按该交易日的历史快照重算（用于回填，避免前视偏差）。"""
+    latest = as_of or db.execute(
+        text("SELECT max(trade_date) FROM daily_quotes")).scalar()
     if latest is None:
         return []
     key = f"{latest}:{limit}"
@@ -175,8 +182,8 @@ def compute_picks(db: Session, limit: int = 3, refresh: bool = False) -> list[di
         "SELECT code, name, industry FROM stocks "
         "WHERE code NOT LIKE '4%' AND code NOT LIKE '8%' AND code NOT LIKE '92%'"
     )).mappings().all())
-    feats = _load_features(db)
-    hist = _load_history(db)
+    feats = _load_features(db, as_of)
+    hist = _load_history(db, as_of)
     fin = _load_fin(db, latest)
     if stocks.empty or feats.empty or fin.empty:
         return []
@@ -206,8 +213,8 @@ def compute_picks(db: Session, limit: int = 3, refresh: bool = False) -> list[di
                      + 0.3 * pool["rev_cagr"].fillna(0).rank(pct=True)) * 100
     pool = pool.sort_values(["score", "profit_cagr"], ascending=False)
 
-    heat = _load_heat(db)
-    zones = _load_zones(db)
+    heat = _load_heat(db, as_of)
+    zones = _load_zones(db, as_of)
 
     picks: list[dict] = []
     ind_cnt: dict[str, int] = {}

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (DailyQuote, FinIndicator, IntradaySpot, Stock, StockPool,
                       ValuationDaily, is_bj_code)
+from .finutil import avail_date
 
 log = logging.getLogger(__name__)
 
@@ -51,10 +52,16 @@ def _cagr(yoy_list: list[float]) -> float | None:
     return float(np.mean(ys))
 
 
-def _recent_fin(db: Session, code: str, n: int = 4) -> list[FinIndicator]:
-    return (db.query(FinIndicator)
+def _recent_fin(db: Session, code: str, n: int = 4,
+                as_of: date | None = None) -> list[FinIndicator]:
+    """近 n 期财务。传 as_of 时按法定披露截止日过滤，避免前视偏差。"""
+    rows = (db.query(FinIndicator)
             .filter(FinIndicator.code == code)
-            .order_by(FinIndicator.report_date.desc()).limit(n).all())
+            .order_by(FinIndicator.report_date.desc())
+            .limit(n * 3 if as_of else n).all())
+    if as_of is not None:
+        rows = [r for r in rows if avail_date(r.report_date) <= as_of][:n]
+    return rows
 
 
 def _pe_percentile(db: Session, code: str,
@@ -77,7 +84,8 @@ def _pe_percentile(db: Session, code: str,
 
 
 def run_screen(db: Session, batch_date: date | None = None,
-               intraday: bool = False) -> dict:
+               intraday: bool = False, as_of: date | None = None) -> dict:
+    """as_of 仅用于历史重算（按披露截止日过滤财报）；实盘与盘中传 None。"""
     batch_date = batch_date or date.today()
 
     # 盘中模式：加载当日快照价
@@ -144,7 +152,7 @@ def run_screen(db: Session, batch_date: date | None = None,
             continue
 
         # 打分
-        recents = _recent_fin(db, code, 4)
+        recents = _recent_fin(db, code, 4, as_of=as_of)
         cur_override = None
         spot = spot_map.get(code)
         if spot and spot.price:

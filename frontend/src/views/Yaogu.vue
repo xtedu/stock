@@ -218,13 +218,14 @@ function topReasons(g) {
 }
 
 const scoreKeyName = (k) => ({
-  price: '价格', amount: '市值代理', theme: '题材',
-  chip: '筹码', amplitude: '换手代理', position: '位置板型'
+  price: '价格', float_mv: '流通市值', theme: '题材', chip: '筹码',
+  turnover: '换手率', seal: '封单比', position: '位置板型'
 }[k] || k)
 
 const scoreMax = (k) => ({
-  price: 20, amount: 20, theme: 20, chip: 15, amplitude: 15, position: 10
-}[k] || 20)
+  price: 15, float_mv: 20, theme: 15, chip: 10,
+  turnover: 15, seal: 15, position: 10
+}[k] || 15)
 
 const scoreColor = (v, max) => {
   const pct = v / max
