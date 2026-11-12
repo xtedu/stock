@@ -106,6 +106,23 @@ def _fetch_tencent(code: str, start: str, end: str) -> pd.DataFrame | None:
     return df.reset_index(drop=True)
 
 
+def _fetch_sina(code: str, start: str, end: str) -> pd.DataFrame | None:
+    """新浪前复权日线（第三级降级）。成交量单位由「股」换算成「手」。"""
+    sym = _sina_symbol(code)
+    if sym is None:
+        return None
+    df = ak.stock_zh_a_daily(symbol=sym, start_date=start, end_date=end,
+                             adjust="qfq")
+    if df is None or df.empty:
+        return None
+    df = df.rename(columns={"date": "日期", "open": "开盘", "high": "最高",
+                            "low": "最低", "close": "收盘",
+                            "volume": "成交量", "amount": "成交额"})
+    df["日期"] = pd.to_datetime(df["日期"])
+    df["成交量"] = pd.to_numeric(df["成交量"], errors="coerce") / 100.0
+    return df
+
+
 def _retry(fn, attempts: int = 3):
     """带指数退避 + 随机抖动的重试；返回非空 DataFrame，否则 None。"""
     for i in range(attempts):
@@ -119,22 +136,25 @@ def _retry(fn, attempts: int = 3):
     return None
 
 
-def _fetch_quotes(code: str, start: str, end: str, use_em: bool = True):
-    """单只日线：东财优先，失败降级新浪（沪深）。返回 (code, df, source)。
+_FETCHERS = {"em": _fetch_em, "tx": _fetch_tencent, "sina": _fetch_sina}
+_SRC_LABEL = {"em": "eastmoney", "tx": "tencent", "sina": "sina"}
 
-    每次请求后随机 sleep，并对空响应/异常做退避重试，降低封禁风险。
+
+def _fetch_quotes(code: str, start: str, end: str,
+                  order: tuple[str, ...] = ("em", "tx", "sina")):
+    """单只日线：按 order 依次尝试数据源。返回 (code, df, source)。
+
+    主源 3 次退避重试，降级源只试 1 次（源已被限流时死磕只会延长封禁）。
     """
-    if use_em:
-        df = _retry(lambda: _fetch_em(code, start, end))
-        time.sleep(random.uniform(0.3, 0.8))
-        if df is not None:
-            return code, df, "eastmoney"
     if is_bj_code(code):
-        log.warning("quotes skipped (北交所无可用数据源): %s", code)
         return code, None, "skipped"
-    df = _retry(lambda: _fetch_tencent(code, start, end))
-    time.sleep(random.uniform(0.3, 0.8))
-    return code, df, ("tencent" if df is not None else "fail")
+    for i, name in enumerate(order):
+        fn = _FETCHERS[name]
+        df = _retry(lambda: fn(code, start, end), attempts=3 if i == 0 else 1)
+        time.sleep(random.uniform(0.2, 0.6))
+        if df is not None and not df.empty:
+            return code, df, _SRC_LABEL[name]
+    return code, None, "fail"
 
 
 def _upsert_quotes(db: Session, code: str, df: pd.DataFrame) -> int:
@@ -172,7 +192,14 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
     - only_existing=True 时只修「已有历史」的增量缺口，不拉全历史；
       当日全市场 bar 由 sync_daily_bars_from_spot 一次性写入，正常情况这里是空跑
     """
-    total = sync_stock_list(db)
+    # 股票列表接口（沪深交易所站点）偶发超时，失败时沿用库里已有列表继续跑
+    try:
+        total = sync_stock_list(db)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        total = db.query(func.count(Stock.code)).scalar() or 0
+        log.warning("stock list sync failed, use existing %d: %s",
+                    total, str(e)[:80])
     codes = [c for (c,) in db.query(Stock.code).all()]
 
     latest = dict(db.query(DailyQuote.code,
@@ -192,17 +219,26 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
         return {"stocks": total, "fetched": 0, "rows": 0, "source": "-"}
 
     end = today.strftime("%Y%m%d")
-    # 探活：先用一只沪深票试东财，成功则高并发跑东财；失败则全程低并发走新浪
-    use_em = False
+    # 探活：东财 → 腾讯 → 新浪，跳过已被限流的源（死磕只会延长封禁）
+    order: tuple[str, ...] = ("em", "tx", "sina")
     probe = next((c for c in todo if not is_bj_code(c)), None)
     if probe is not None:
-        try:
-            _fetch_em(probe, (today - timedelta(days=10)).strftime("%Y%m%d"), end)
-            use_em = True
-            log.info("eastmoney quotes alive, use it first")
-        except Exception as e:
-            log.warning("eastmoney quotes unavailable, fallback to sina: %s",
-                        str(e)[:80])
+        p_start = (today - timedelta(days=10)).strftime("%Y%m%d")
+        for i, name in enumerate(order):
+            try:
+                df = _FETCHERS[name](probe, p_start, end)
+            except Exception as e:  # noqa: BLE001
+                log.warning("probe %s failed: %s", name, str(e)[:80])
+                continue
+            if df is not None and not df.empty:
+                order = order[i:]
+                if name != "em":
+                    log.warning("eastmoney quotes unavailable, primary source -> %s",
+                                name)
+                else:
+                    log.info("eastmoney quotes alive, use it first")
+                break
+    use_em = order[0] == "em"
 
     # 并发统一压到 2：akshare 底层原生扩展在多线程并发下曾出现 SIGSEGV
     # （2 核小内存机上尤为明显），与本地长时间验证过的配置保持一致。
@@ -234,7 +270,7 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
         return em_workers if use_em_flag else sg_workers
 
     with ThreadPoolExecutor(max_workers=_pick_workers(use_em)) as ex:
-        futs = {ex.submit(_fetch_quotes, c, _start_of(c), end, use_em): c
+        futs = {ex.submit(_fetch_quotes, c, _start_of(c), end, order): c
                 for c in todo}
         for fut in as_completed(futs):
             code, df, source = fut.result()
@@ -276,7 +312,7 @@ INDEX_CODES = {"000300": "沪深300", "000905": "中证500", "000852": "中证10
 
 
 def _fetch_index(code: str, start: str, end: str) -> tuple[pd.DataFrame | None, str]:
-    """东财指数历史优先，失败降级 stock_zh_index_daily_em（全历史本地裁剪）。"""
+    """指数日线：东财 → 东财全历史 → 新浪，逐级降级（同一 IP 被限流时依次切换）。"""
     try:
         df = ak.index_zh_a_hist(symbol=code, period="daily",
                                 start_date=start, end_date=end)
@@ -285,8 +321,13 @@ def _fetch_index(code: str, start: str, end: str) -> tuple[pd.DataFrame | None, 
     except Exception as e:
         log.warning("index_zh_a_hist failed %s: %s", code, str(e)[:80])
     prefix = "sh" if code.startswith("00") else "sz"
-    df = ak.stock_zh_index_daily_em(symbol=prefix + code)
-    return df, "em_daily"
+    try:
+        df = ak.stock_zh_index_daily_em(symbol=prefix + code)
+        if df is not None and not df.empty:
+            return df, "em_daily"
+    except Exception as e:
+        log.warning("stock_zh_index_daily_em failed %s: %s", code, str(e)[:80])
+    return ak.stock_zh_index_daily(symbol=prefix + code), "sina"
 
 
 def _index_rows(df: pd.DataFrame, start: date) -> list[dict]:
