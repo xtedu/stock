@@ -16,7 +16,7 @@ import pandas as pd
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from ..models import CalendarEvent, StockPool, is_bj_code
+from ..models import CalendarEvent, StockPool, is_main_board
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def _release_events(days: list[date], pool: set[str]) -> list[dict]:
     for _, r in df.iterrows():
         code = str(r.get("股票代码") or "").strip().zfill(6)
         ratio = _num(r.get("占解禁前流通市值比例"))
-        if ratio is None or is_bj_code(code):
+        if ratio is None or not is_main_board(code):
             continue
         pct = round(ratio * 100, 2)
         imp = 3 if pct >= 5 else 2 if pct >= 1 else 1

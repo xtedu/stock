@@ -8,8 +8,8 @@ from datetime import datetime, time
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .db import SessionLocal
-from .services import (datafeed, money_flow, picks_track, safety_zone,
-                       screener, yaogu)
+from .services import (datafeed, features, labels, money_flow, picks_track,
+                       safety_zone, screener, trading_calendar, yaogu)
 from .services.monitor import run_digest_job, run_monitor_job
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,11 @@ def setup_jobs() -> None:
                       "cron", day_of_week="mon-fri", hour=15, minute=50,
                       id="sync_index", replace_existing=True,
                       max_instances=1, misfire_grace_time=3600)
+    # 16:22 全市场截面特征（等收盘行情 + 资金流就绪）
+    scheduler.add_job(lambda: _with_db(features.build_features),
+                      "cron", day_of_week="mon-fri", hour=16, minute=22,
+                      id="build_features", replace_existing=True,
+                      max_instances=1, misfire_grace_time=1800)
     # 16:25 选股快照落库（在 16:10 筛选、16:15 区间之后）
     scheduler.add_job(lambda: _with_db(picks_track.save_snapshot),
                       "cron", day_of_week="mon-fri", hour=16, minute=25,
@@ -121,6 +126,11 @@ def setup_jobs() -> None:
     scheduler.add_job(lambda: _with_db(picks_track.update_forward_returns),
                       "cron", day_of_week="mon-fri", hour=16, minute=30,
                       id="update_fwd", replace_existing=True,
+                      max_instances=1, misfire_grace_time=1800)
+    # 16:32 全市场前向标签回填（供可行性检验与模型训练）
+    scheduler.add_job(lambda: _with_db(labels.build_labels),
+                      "cron", day_of_week="mon-fri", hour=16, minute=32,
+                      id="build_labels", replace_existing=True,
                       max_instances=1, misfire_grace_time=1800)
     # 16:45 低估观察汇总（仅跌破下沿、未满足右侧确认的标的合并一条）
     scheduler.add_job(run_digest_job, "cron", day_of_week="mon-fri",
@@ -142,6 +152,12 @@ def setup_jobs() -> None:
                       "cron", day_of_week="sun", hour=9, minute=0,
                       id="sync_industry", replace_existing=True,
                       max_instances=1, misfire_grace_time=86400)
+    # 周日 08:50 交易日历同步（真实开市日，供特征/标签/调度判断）
+    scheduler.add_job(
+        lambda: _with_db(trading_calendar.sync_trade_calendar),
+        "cron", day_of_week="sun", hour=8, minute=50,
+        id="sync_trade_calendar", replace_existing=True,
+        max_instances=1, misfire_grace_time=86400)
     # 盘中每 30 分钟监控（9:30-15:00）
     scheduler.add_job(run_monitor_job, "cron", day_of_week="mon-fri",
                       hour="9-14", minute="*/30", id="monitor",
@@ -184,16 +200,22 @@ def start() -> None:
          lambda: _with_db(money_flow.sync_money_flow)),
         ("sync_index",        time(15, 50), _WEEKDAY_ONLY,
          lambda: _with_db(datafeed.sync_index_quotes)),
+        ("build_features",    time(16, 22), _WEEKDAY_ONLY,
+         lambda: _with_db(features.build_features)),
         ("picks_snapshot",    time(16, 25), _WEEKDAY_ONLY,
          lambda: _with_db(picks_track.save_snapshot)),
         ("update_fwd",        time(16, 30), _WEEKDAY_ONLY,
          lambda: _with_db(picks_track.update_forward_returns)),
+        ("build_labels",      time(16, 32), _WEEKDAY_ONLY,
+         lambda: _with_db(labels.build_labels)),
         ("zone_digest",       time(16, 45), _WEEKDAY_ONLY, run_digest_job),
         ("intraday_run",      time(14, 0),  _WEEKDAY_ONLY, _intraday_chain),
         ("sync_fundamentals", time(9, 0),  _SAT,
          lambda: _with_db(datafeed.sync_all_fundamentals, years=5)),
         ("sync_industry",     time(9, 0),  _SUN,
          lambda: _with_db(datafeed.sync_industry)),
+        ("sync_trade_calendar", time(8, 50), _SUN,
+         lambda: _with_db(trading_calendar.sync_trade_calendar)),
     ]
 
     for job_id, t, allowed_days, fn in catch_up:

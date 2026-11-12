@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from ..models import (CalendarEvent, DailyQuote, NewsBrief, NewsItem, Stock,
-                      StockPool, is_bj_code)
+                      StockPool, is_main_board)
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ def _fetch_notice(day: date, pool_codes: set[str]) -> list[dict]:
     out = []
     for _, r in df.iterrows():
         code = str(r.get("代码") or "").strip()
-        if code not in pool_codes or is_bj_code(code):
+        if code not in pool_codes or not is_main_board(code):
             continue
         title = str(r.get("公告标题") or "").strip()
         if not title:
@@ -155,7 +155,7 @@ def _pool_codes(db: Session) -> set[str]:
 def _name_map(db: Session) -> dict[str, str]:
     """股票名 → 代码，用于把快讯关联到池内个股。"""
     rows = db.query(Stock.code, Stock.name).filter(Stock.name.isnot(None)).all()
-    return {n: c for c, n in rows if n and len(n) >= 2 and not is_bj_code(c)}
+    return {n: c for c, n in rows if n and len(n) >= 2 and is_main_board(c)}
 
 
 def sync_news(db: Session, day: date | None = None) -> dict:

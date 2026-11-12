@@ -34,16 +34,15 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from ..models import DailyQuote, Stock, YaoguSnapshot, is_bj_code
+from ..models import DailyQuote, Stock, YaoguSnapshot, is_main_board
 from .datafeed import fetch_spot_bars
 
 _CST = timezone(timedelta(hours=8))
 
 log = logging.getLogger(__name__)
 
-# 涨跌停阈值（%）—— 科创板/创业板 20%，主板 10%
+# 涨跌停阈值 —— 仅沪深主板，统一 10%
 LIMIT_RATE_MAIN = 0.095
-LIMIT_RATE_GEM = 0.195
 
 
 # --------------------------------------------------------------------------- #
@@ -70,15 +69,15 @@ def _load_quotes(db: Session, days: int = 300) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["trade_date"] = pd.to_datetime(df["trade_date"])
 
-    # 过滤北交所 + close 为零 / 空
-    df = df[~df["code"].apply(is_bj_code)]
+    # 过滤非沪深主板 + close 为零 / 空
+    df = df[df["code"].apply(is_main_board)]
     df = df[df["close"].fillna(0) > 0]
     df = df.sort_values(["code", "trade_date"])
     return df
 
 
 def _load_stocks(db: Session) -> dict[str, Stock]:
-    return {s.code: s for s in db.query(Stock).all() if not is_bj_code(s.code)}
+    return {s.code: s for s in db.query(Stock).all() if is_main_board(s.code)}
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +145,7 @@ def _fetch_limit_reasons(trade_date: date) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for it in info:
         code = str(it.get("code") or "").zfill(6)
-        if len(code) != 6 or is_bj_code(code):
+        if len(code) != 6 or not is_main_board(code):
             continue
         seal = it.get("order_amount")
         mv = it.get("currency_value")
@@ -180,9 +179,7 @@ def _fetch_limit_reasons(trade_date: date) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 
 def _limit_rate(code: str) -> float:
-    """创业板(300/301)/科创板(688) 20%，其余 10%。"""
-    if code.startswith(("300", "301", "688")):
-        return LIMIT_RATE_GEM
+    """沪深主板统一 10% 涨跌停。"""
     return LIMIT_RATE_MAIN
 
 
@@ -735,9 +732,11 @@ def _run_screen(db: Session, batch_date: date | None = None,
 # --------------------------------------------------------------------------- #
 
 def _rows_from_ladder(trade_date: date, ladder: list[dict],
-                      score_map: dict[str, int] | None = None) -> list[dict]:
+                      score_map: dict[str, int] | None = None,
+                      fallback_map: dict[str, bool] | None = None) -> list[dict]:
     """把梯队结构摊平成 yaogu_snapshot 行。"""
     score_map = score_map or {}
+    fallback_map = fallback_map or {}
     rows = []
     for g in ladder:
         for s in g.get("stocks", []):
@@ -762,6 +761,7 @@ def _rows_from_ladder(trade_date: date, ladder: list[dict],
                 "reason": s.get("reason"),
                 "is_open_board": s.get("is_open_board"),
                 "score": score_map.get(s["code"]),
+                "score_fallback": fallback_map.get(s["code"]),
             })
     return rows
 
@@ -782,7 +782,8 @@ def _upsert_snapshot(db: Session, trade_date: date, rows: list[dict]) -> int:
             "name", "industry", "close", "amount_yi", "streak", "high_days",
             "limit_up_type", "first_limit_time", "last_limit_time",
             "break_count", "seal_amount_yi", "turnover_rate", "float_mv_yi",
-            "ret20_pct", "amplitude_pct", "reason", "is_open_board", "score")},
+            "ret20_pct", "amplitude_pct", "reason", "is_open_board", "score",
+            "score_fallback")},
     )
     db.execute(stmt)
     db.commit()
@@ -799,7 +800,10 @@ def save_snapshot(db: Session, result: dict,
         result.get("latest_quote_date") or result["batch_date"])
     score_map = {c["code"]: c.get("score")
                  for c in result.get("candidates", [])}
-    return _upsert_snapshot(db, td, _rows_from_ladder(td, ladder, score_map))
+    fallback_map = {c["code"]: c.get("score_fallback")
+                    for c in result.get("candidates", [])}
+    return _upsert_snapshot(db, td, _rows_from_ladder(
+        td, ladder, score_map, fallback_map))
 
 
 def save_today_snapshot(db: Session) -> dict:

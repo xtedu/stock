@@ -20,12 +20,14 @@ class Stock(Base):
     float_mv: Mapped[float | None] = mapped_column(Numeric(20, 2))
 
 
-# 北交所代码前缀（43/83/87/88/920 开头），本项目统一只处理沪深
-BJ_PREFIXES = ("4", "8", "92")
+# 沪深主板前缀：60x 沪市主板，00x 深市主板（含原中小板 002/003）
+# 创业板 300/301、科创板 688/689、北交所 4/8/92 均不在本项目范围内
+MAIN_BOARD_PREFIXES = ("60", "00")
 
 
-def is_bj_code(code: str) -> bool:
-    return code.startswith(BJ_PREFIXES)
+def is_main_board(code: str) -> bool:
+    """是否沪深主板（本项目唯一股票池口径）。"""
+    return code.startswith(MAIN_BOARD_PREFIXES)
 
 
 class DailyQuote(Base):
@@ -300,5 +302,116 @@ class YaoguSnapshot(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     is_open_board: Mapped[bool | None] = mapped_column(Boolean)
     score: Mapped[int | None] = mapped_column(Integer)
+    # 打分是否使用代理值（流通市值/换手率缺失时为 True）
+    score_fallback: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class TradeCalendar(Base):
+    """交易日历（真实开市日，替代按工作日近似）。"""
+    __tablename__ = "dim_trade_calendar"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class FeatureStockDaily(Base):
+    """全市场每日截面特征（沪深主板），所有策略的统一取数底座。
+
+    (code, as_of) 唯一；feature_version 用于区分口径版本，重算时同日覆盖。
+    """
+    __tablename__ = "feat_stock_daily"
+    __table_args__ = (UniqueConstraint("code", "as_of",
+                                       name="uq_feat_stock_daily_code_date"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True,
+                                    autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), index=True)
+    as_of: Mapped[date] = mapped_column(Date, index=True)
+    industry: Mapped[str | None] = mapped_column(String(50))
+    close: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    pct_chg: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    ret5: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    ret20: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    ret60: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    ma20: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    ma60: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    ma250: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    bias20: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    ma20_slope_pct: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    vol20: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    vol60: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    amt20: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    amt_ratio: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    pos60: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    limit_up: Mapped[bool | None] = mapped_column(Boolean)
+    streak: Mapped[int | None] = mapped_column(Integer)
+    pe: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    pb: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    pe_pct5y: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    roe_avg: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    profit_cagr: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    rev_cagr: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    debt_ratio: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    mf_main_net_pct: Mapped[float | None] = mapped_column(Numeric(8, 2))
+    mf_main_net_5d: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    ind_heat3: Mapped[int | None] = mapped_column(Integer)
+    feature_version: Mapped[str | None] = mapped_column(String(20))
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class LabelFwd(Base):
+    """全市场前向收益标签，任何策略共用，不再各自回填。"""
+    __tablename__ = "label_fwd"
+    __table_args__ = (UniqueConstraint("code", "as_of", "horizon",
+                                       name="uq_label_fwd_code_date_horizon"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True,
+                                    autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), index=True)
+    as_of: Mapped[date] = mapped_column(Date, index=True)
+    horizon: Mapped[int] = mapped_column(Integer)
+    fwd_ret: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    bench_ret: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    excess: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    fwd_max_dd: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    label_version: Mapped[str | None] = mapped_column(String(20))
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class StrategyParam(Base):
+    """策略参数中心：阈值/权重带版本，回测与实盘共用。"""
+    __tablename__ = "strategy_params"
+    __table_args__ = (UniqueConstraint("key", "version",
+                                       name="uq_strategy_params_key_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,
+                                    autoincrement=True)
+    key: Mapped[str] = mapped_column(String(60))
+    value: Mapped[dict | None] = mapped_column(JSONB)
+    version: Mapped[str] = mapped_column(String(20))
+    effective_from: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
+                                                 server_default=func.now())
+
+
+class DataQuality(Base):
+    """数据质量门禁记录：覆盖率/完整率/异常值，供降级与告警判断。"""
+    __tablename__ = "data_quality"
+    __table_args__ = (UniqueConstraint("dataset", "as_of", "metric",
+                                       name="uq_data_quality_ds_date_metric"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True,
+                                    autoincrement=True)
+    dataset: Mapped[str] = mapped_column(String(40))
+    as_of: Mapped[date] = mapped_column(Date, index=True)
+    metric: Mapped[str] = mapped_column(String(40))
+    value: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    status: Mapped[str | None] = mapped_column(String(10))   # ok / warn / fail
+    detail: Mapped[dict | None] = mapped_column(JSONB)
+    checked_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True),
                                                  server_default=func.now())

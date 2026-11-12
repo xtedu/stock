@@ -138,8 +138,7 @@ def _load_heat(db: Session, as_of: date | None = None) -> dict[str, int]:
         ),
         l AS (
           SELECT code, trade_date, close / NULLIF(prev, 0) - 1 AS chg,
-                 CASE WHEN code LIKE '300%' OR code LIKE '301%' OR code LIKE '688%'
-                      THEN 0.195 ELSE 0.095 END AS rate
+                 0.095 AS rate
           FROM q
         ),
         d3 AS (SELECT DISTINCT trade_date FROM q
@@ -180,7 +179,7 @@ def compute_picks(db: Session, limit: int = 3, refresh: bool = False,
 
     stocks = pd.DataFrame(db.execute(text(
         "SELECT code, name, industry FROM stocks "
-        "WHERE code NOT LIKE '4%' AND code NOT LIKE '8%' AND code NOT LIKE '92%'"
+        "WHERE code LIKE '60%' OR code LIKE '00%'"
     )).mappings().all())
     feats = _load_features(db, as_of)
     hist = _load_history(db, as_of)
@@ -335,14 +334,14 @@ def compute_context(db: Session) -> dict:
     df = pd.DataFrame(db.execute(sql).mappings().all())
     if df.empty:
         return {}
-    df = df[~df["code"].str.startswith(("4", "8", "92"))]
+    df = df[df["code"].str.startswith(("60", "00"))]
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     for c in ("close", "amount", "prev", "close20"):
         df[c] = df[c].astype(float)
     df["chg"] = df["close"] / df["prev"] - 1
     df["ret20"] = df["close"] / df["close20"] - 1
-    df["rate"] = np.where(df["code"].str.match(r"^(300|301|688|689)"),
-                          0.195, 0.095)
+    # 仅沪深主板，涨跌停阈值统一 10%
+    df["rate"] = 0.095
     df["up"] = (df["chg"] > 0).astype(float)
     df["lu"] = df["chg"] >= df["rate"] - 0.005
     df["ld"] = df["chg"] <= -(df["rate"] - 0.005)

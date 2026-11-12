@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from ..models import (DailyQuote, FinIndicator, IndexDaily, IntradaySpot,
-                      Stock, ValuationDaily, is_bj_code)
+                      Stock, ValuationDaily, is_main_board)
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,10 @@ def sync_stock_list(db: Session) -> int:
     df = ak.stock_info_a_code_name()
     count = 0
     for _, row in df.iterrows():
-        stmt = insert(Stock).values(code=str(row["code"]), name=str(row["name"]))
+        code = str(row["code"])
+        if not is_main_board(code):
+            continue
+        stmt = insert(Stock).values(code=code, name=str(row["name"]))
         stmt = stmt.on_conflict_do_nothing(index_elements=["code"])
         db.execute(stmt)
         count += 1
@@ -146,7 +149,7 @@ def _fetch_quotes(code: str, start: str, end: str,
 
     主源 3 次退避重试，降级源只试 1 次（源已被限流时死磕只会延长封禁）。
     """
-    if is_bj_code(code):
+    if not is_main_board(code):
         return code, None, "skipped"
     for i, name in enumerate(order):
         fn = _FETCHERS[name]
@@ -207,7 +210,7 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
                   .group_by(DailyQuote.code).all())
     today = date.today()
     stale = [c for c in codes if latest.get(c) is None or latest[c] < today]
-    todo = [c for c in stale if not is_bj_code(c)]
+    todo = [c for c in stale if is_main_board(c)]
     if only_existing:
         todo = [c for c in todo if latest.get(c) is not None]
     skipped = len(codes) - len(todo)
@@ -221,7 +224,7 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
     end = today.strftime("%Y%m%d")
     # 探活：东财 → 腾讯 → 新浪，跳过已被限流的源（死磕只会延长封禁）
     order: tuple[str, ...] = ("em", "tx", "sina")
-    probe = next((c for c in todo if not is_bj_code(c)), None)
+    probe = next((c for c in todo if is_main_board(c)), None)
     if probe is not None:
         p_start = (today - timedelta(days=10)).strftime("%Y%m%d")
         for i, name in enumerate(order):
@@ -295,7 +298,7 @@ def sync_all_quotes(db: Session, years: int = 5, workers: int = 2,
     coverage = db.query(func.count(DailyQuote.code.distinct())
                         .filter(DailyQuote.trade_date == today)).scalar() or 0
     hs_total = len([c for c, in db.query(Stock.code).all()
-                    if not is_bj_code(c)])
+                    if is_main_board(c)])
     cov_pct = coverage / hs_total * 100 if hs_total else 0
     if cov_pct < 80:
         log.warning("daily quotes coverage low: %.1f%% (%d/%d)",
@@ -432,7 +435,7 @@ def _spot_bars() -> tuple[pd.DataFrame | None, str]:
     out["code"] = (out["code"].astype(str)
                    .str.replace(r"^(sh|sz|bj)", "", regex=True).str.zfill(6))
     out = out[out["code"].str.len() == 6]
-    out = out[~out["code"].apply(is_bj_code)]
+    out = out[out["code"].apply(is_main_board)]
     out = out[out["close"].fillna(0) > 0]
     for c in ("open", "high", "low", "volume", "amount", "pct_chg"):
         if c not in out.columns:
@@ -536,7 +539,7 @@ def sync_spot_snapshot(db: Session) -> int:
     rows = []
     for _, r in df.iterrows():
         code = str(r.get("代码", ""))
-        if len(code) != 6 or is_bj_code(code):
+        if len(code) != 6 or not is_main_board(code):
             continue
         rows.append({"code": code, "price": _f(r.get("最新价")),
                      "pe": _f(r.get(pe_col)) if pe_col else None,
@@ -653,7 +656,7 @@ def sync_stock_fundamentals(db: Session, code: str) -> dict:
 
 def sync_all_fundamentals(db: Session, years: int = 5, workers: int = 4) -> dict:
     """全市场基本面同步：财务指标 + 估值历史（仅沪深，并发抓取、串行入库）。"""
-    codes = [c for (c,) in db.query(Stock.code).all() if not is_bj_code(c)]
+    codes = [c for (c,) in db.query(Stock.code).all() if is_main_board(c)]
     ok_fin = ok_val = 0
     start_year = str(date.today().year - years)
     with ThreadPoolExecutor(max_workers=workers) as ex:

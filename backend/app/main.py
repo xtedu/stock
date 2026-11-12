@@ -4,8 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import scheduler
-from .api import (alerts, compare, insights, jobs, news, picks, pool, stocks,
-                  yaogu, zones)
+from .api import (alerts, compare, insights, jobs, news, picks, pool, research,
+                  stocks, yaogu, zones)
 from .config import get_settings
 
 logging.basicConfig(level=logging.INFO,
@@ -31,6 +31,7 @@ app.include_router(compare.router)
 app.include_router(jobs.router)
 app.include_router(yaogu.router)
 app.include_router(news.router)
+app.include_router(research.router)
 
 
 @app.on_event("startup")

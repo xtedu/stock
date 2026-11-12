@@ -1,4 +1,6 @@
-"""优质股筛选：硬门槛 + 加权打分，结果写 stock_pool。
+"""主板候选池：硬门槛 + 增速排序，结果写 stock_pool。
+
+股票池口径：仅沪深主板（60x / 00x）。
 
 硬门槛（可调）：
 - 非 ST、上市满 3 年（以日线历史长度近似）
@@ -6,12 +8,10 @@
 - 最新资产负债率 <= 60%
 - 最新扣非净利润 > 0（近一年无亏损）
 
-打分（0-100）：
-- ROE 均值            35%
-- 营收 3 年复合增速    15%
-- 净利 3 年复合增速    15%
-- 现金流质量(OCF/NP)  15%
-- PE 5年分位（低好）   20%
+打分（0-100，与每日选股同一口径）：
+- 净利 3 年复合增速  70%
+- 营收 3 年复合增速  30%
+ROE 与 PE 分位只作为门槛/展示信息，不再参与打分（回测中为噪音）。
 """
 import logging
 from datetime import date
@@ -21,7 +21,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import (DailyQuote, FinIndicator, IntradaySpot, Stock, StockPool,
-                      ValuationDaily, is_bj_code)
+                      ValuationDaily, is_main_board)
 from .finutil import avail_date
 
 log = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ GATES = {
     "debt_max": 60.0,      # 资产负债率上限
     "min_history_days": 750,  # 日线历史条数（≈3年）
 }
-WEIGHTS = {"roe": 0.35, "rev": 0.15, "profit": 0.15,
-           "cash": 0.15, "pe_pct": 0.20}
+WEIGHTS = {"profit": 0.7, "rev": 0.3}
+SCORE_CLIP = (-100.0, 200.0)   # 增速原始值裁剪，避免极端值主导排序
 
 
 def _cap(v, full=100.0):
@@ -137,7 +137,7 @@ def run_screen(db: Session, batch_date: date | None = None,
     selected = 0
     for r in fin_rows:
         code = r.code
-        if (is_bj_code(code) or code in st_codes
+        if (not is_main_board(code) or code in st_codes
                 or hist.get(code, 0) < GATES["min_history_days"]):
             continue
         lf = latest_fin.get(code)
@@ -184,9 +184,11 @@ def run_screen(db: Session, batch_date: date | None = None,
         s_profit = _cap(profit_cagr, 30.0)
         s_cash = min(100.0, max(0.0, cash_avg)) if cash_avg is not None else 50.0
         s_pe = (100.0 - pe_pct) if pe_pct is not None else 50.0
-        score = round(s_roe * WEIGHTS["roe"] + s_rev * WEIGHTS["rev"]
-                      + s_profit * WEIGHTS["profit"] + s_cash * WEIGHTS["cash"]
-                      + s_pe * WEIGHTS["pe_pct"], 2)
+        # 打分只保留增速，与每日选股同一口径；裁剪极端值避免单只主导排序
+        profit_raw = min(max(profit_cagr, SCORE_CLIP[0]), SCORE_CLIP[1])
+        rev_raw = min(max(rev_cagr, SCORE_CLIP[0]), SCORE_CLIP[1])
+        score = round(profit_raw * WEIGHTS["profit"]
+                      + rev_raw * WEIGHTS["rev"], 2)
 
         db.add(StockPool(
             code=code, score=score, batch_date=batch_date, active=True,
