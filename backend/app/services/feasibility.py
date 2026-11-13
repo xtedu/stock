@@ -186,6 +186,40 @@ def run_composite(db: Session, window: int = 20, days: int = 200,
         components.append({"factor": f,
                            "mean_ic": round(float(fic.mean()), 4) if len(fic) else None})
 
+    # 分季度稳定性：季度内单独看 IC、单调性、多空差
+    sub["_q"] = pd.to_datetime(sub["as_of"]).dt.to_period("Q").astype(str)
+    by_quarter = []
+    for q, g in sub.groupby("_q"):
+        qic = _ic_series(g).dropna()
+        qmean = float(qic.mean()) if len(qic) else 0.0
+        qstd = float(qic.std()) if len(qic) > 1 else 0.0
+        qspread, qdec = _decile_spread(g)
+        qmono = None
+        if len(qdec) == 10:
+            qmono = float(pd.Series(qdec).rank().corr(pd.Series(range(10)).rank()))
+        by_quarter.append({
+            "quarter": q,
+            "days": int(g["as_of"].nunique()),
+            "avg_stocks": int(round(g.groupby("as_of").size().mean())),
+            "mean_ic": round(qmean, 4),
+            "t": round(qmean / qstd * np.sqrt(len(qic)), 2) if qstd > 0 else 0.0,
+            "positive_rate": round(float((qic > 0).mean()), 3) if len(qic) else None,
+            "monotonicity": round(qmono, 3) if qmono is not None else None,
+            "long_short_pct": qspread,
+        })
+
+    # 非重叠采样：每 window 个交易日取一个，避免重叠窗口把 t 值抬高
+    dates = sorted(sub["as_of"].unique())
+    pick = set(dates[::window])
+    nic = _ic_series(sub[sub["as_of"].isin(pick)]).dropna()
+    nmean = float(nic.mean()) if len(nic) else 0.0
+    nstd = float(nic.std()) if len(nic) > 1 else 0.0
+    non_overlap = {
+        "samples": int(len(nic)),
+        "mean_ic": round(nmean, 4),
+        "t": round(nmean / nstd * np.sqrt(len(nic)), 2) if nstd > 0 else 0.0,
+    }
+
     ok = (mono is not None and mono >= 0.8 and spread is not None
           and spread > 0 and abs(mean_ic) >= 0.02 and abs(t) >= 2.0)
     result = {
@@ -204,6 +238,9 @@ def run_composite(db: Session, window: int = 20, days: int = 200,
         "long_short_pct": spread,
         "deciles_pct": deciles,
         "component_ic": components,
+        "by_quarter": by_quarter,
+        "quarters_positive": sum(1 for q in by_quarter if q["mean_ic"] > 0),
+        "non_overlap": non_overlap,
         "verdict": "合成分分层单调，可进入纸面跟踪" if ok else
                    "分层不单调或信号不足，需调整因子组合",
         "cached_at": time.strftime("%Y-%m-%d %H:%M:%S"),
