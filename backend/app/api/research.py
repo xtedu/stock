@@ -20,6 +20,14 @@ def get_feasibility(window: int = Query(20, ge=1, le=120),
     return feasibility.run_feasibility(db, window=window, days=days)
 
 
+@router.get("/composite")
+def get_composite(window: int = Query(20, ge=1, le=120),
+                  days: int = Query(200, ge=20, le=500),
+                  db: Session = Depends(get_db)):
+    """等权合成分（低波动 + 低位置 + 低 PB + 反转）的十分位单调性。"""
+    return feasibility.run_composite(db, window=window, days=days)
+
+
 @router.get("/coverage")
 def get_coverage(db: Session = Depends(get_db)):
     """特征层与标签层的最新覆盖情况。"""

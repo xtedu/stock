@@ -30,6 +30,9 @@ FEATURE_COLUMNS = [
 _CACHE: dict[tuple, tuple[float, dict]] = {}
 _CACHE_TTL = 600.0
 
+# 等权合成分的候选因子：IC 检验中稳定为负（低值更优），合成时取反向排名
+COMPOSITE_FACTORS = ("vol60", "pos60", "pb", "ret20")
+
 
 def _load(db: Session, window: int, days: int) -> pd.DataFrame:
     latest = db.execute(text(
@@ -129,6 +132,80 @@ def run_feasibility(db: Session, window: int = 20,
         "verdict": ("具备可用排序信号" if usable >= 3 else
                     "信号偏弱，建议先补数据维度"),
         "features": features,
+        "cached_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _CACHE[key] = (time.time(), result)
+    return result
+
+
+def run_composite(db: Session, window: int = 20, days: int = 200,
+                  factors: tuple[str, ...] = COMPOSITE_FACTORS) -> dict:
+    """等权合成分：各因子取反向截面排名后等权平均，检验十分位单调性。"""
+    key = ("composite", window, days, factors)
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < _CACHE_TTL:
+        return hit[1]
+
+    df = _load(db, window, days)
+    if df.empty:
+        return {"window": window, "factors": list(factors), "sample_days": 0,
+                "reason": "特征或标签为空，请先执行 build-features / build-labels"}
+    use = [f for f in factors if f in df.columns]
+    sub = df.dropna(subset=["excess"]).copy()
+    rank_cols = []
+    for f in use:
+        sub[f + "_rank"] = sub.groupby("as_of")[f].rank(pct=True)
+        rank_cols.append(f + "_rank")
+    sub = sub.dropna(subset=rank_cols, how="all")
+    if sub.empty:
+        return {"window": window, "factors": use, "sample_days": 0,
+                "reason": "合成分因子全为空"}
+    # 这批因子已知方向为负：排名越低（低波动/低估值/低涨幅）得分越高
+    sub["score"] = 1 - sub[rank_cols].mean(axis=1)
+    sub["ry"] = sub.groupby("as_of")["excess"].rank()
+    sub["rx"] = sub.groupby("as_of")["score"].rank()
+
+    ic = _ic_series(sub).dropna()
+    mean_ic = float(ic.mean()) if len(ic) else 0.0
+    std_ic = float(ic.std()) if len(ic) > 1 else 0.0
+    t = mean_ic / std_ic * np.sqrt(len(ic)) if std_ic > 0 else 0.0
+    spread, deciles = _decile_spread(sub)
+    mono = None
+    if len(deciles) == 10:
+        # 秩相关（Spearman）：容器内无 scipy，用秩的 Pearson 相关等价实现
+        d = pd.Series(deciles).rank()
+        mono = float(d.corr(pd.Series(range(10)).rank()))
+
+    # 合成分里每个因子的单独 IC（同一批样本，便于对照方向是否一致）
+    components = []
+    for f in use:
+        s = sub.dropna(subset=[f])
+        s = s.assign(fx=s.groupby("as_of")[f].rank())
+        fic = s.groupby("as_of").apply(
+            lambda x: x["fx"].corr(x["ry"]) if len(x) >= 30 else np.nan).dropna()
+        components.append({"factor": f,
+                           "mean_ic": round(float(fic.mean()), 4) if len(fic) else None})
+
+    ok = (mono is not None and mono >= 0.8 and spread is not None
+          and spread > 0 and abs(mean_ic) >= 0.02 and abs(t) >= 2.0)
+    result = {
+        "window": window,
+        "days": days,
+        "factors": use,
+        "weight": "equal_reverse_rank",
+        "sample_days": int(sub["as_of"].nunique()),
+        "avg_stocks": int(round(sub.groupby("as_of").size().mean())),
+        "mean_ic": round(mean_ic, 4),
+        "ic_std": round(std_ic, 4),
+        "icir": round(mean_ic / std_ic, 3) if std_ic > 0 else None,
+        "t": round(float(t), 2),
+        "positive_rate": round(float((ic > 0).mean()), 3),
+        "monotonicity": round(mono, 3) if mono is not None else None,
+        "long_short_pct": spread,
+        "deciles_pct": deciles,
+        "component_ic": components,
+        "verdict": "合成分分层单调，可进入纸面跟踪" if ok else
+                   "分层不单调或信号不足，需调整因子组合",
         "cached_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     _CACHE[key] = (time.time(), result)
