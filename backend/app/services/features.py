@@ -3,6 +3,7 @@
 设计约束：
 - 仅沪深主板（60x / 00x），与股票池口径一致
 - (code, as_of) 唯一，同日重算覆盖
+- 可交易域：主板 ∩ 非 ST/退市 ∩ 当日有成交（非停牌）∩ 上市满 60 个交易日
 - 财务使用 avail_date 做时点过滤（防前视）
 - feature_version 标记口径版本，便于回溯与重算
 """
@@ -21,7 +22,7 @@ from .pick import _load_fin, _load_heat
 
 log = logging.getLogger(__name__)
 
-FEATURE_VERSION = "f1"
+FEATURE_VERSION = "f2"
 LOOKBACK_DAYS = 420          # 覆盖 ma250 + 60 日前向回看
 CHUNK = 400                  # 单条 INSERT 参数数量控制
 
@@ -54,6 +55,7 @@ def _price_features(db: Session, as_of: date) -> pd.DataFrame:
           FROM r
         )
         SELECT code,
+               max(trade_date) FILTER (WHERE rn = 1) AS last_date,
                max(close) FILTER (WHERE rn = 1) AS close,
                max(amount) FILTER (WHERE rn = 1) AS amount,
                max(prev) FILTER (WHERE rn = 1) AS prev,
@@ -93,6 +95,7 @@ def _price_features(db: Session, as_of: date) -> pd.DataFrame:
               "ma20", "ma60", "ma250", "ma20_slope_pct", "bias20",
               "vol20", "vol60", "amt20", "pos60"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["last_date"] = pd.to_datetime(df["last_date"]).dt.date
     df["amt_ratio"] = df["amount"] / df["amt20"].where(df["amt20"] > 0)
     df["limit_up"] = df["pct_chg"] >= 0.095
     return df
@@ -174,11 +177,15 @@ def build_features(db: Session, as_of: date | None = None) -> dict:
     if price.empty:
         return {"as_of": str(as_of), "rows": 0, "reason": "no price data"}
 
-    # 只保留满足最小历史长度的股票，避免新股污染截面
-    price = price[price["n_hist"] >= 60].copy()
+    # 可交易域过滤：只保留 as_of 当日有成交（非停牌）且历史满 60 个交易日的股票
+    price = price[(price["n_hist"] >= 60) & (price["last_date"] == as_of)].copy()
 
     stocks = pd.DataFrame(db.query(Stock.code, Stock.name, Stock.industry)
                           .all(), columns=["code", "name", "industry"])
+    # ST / *ST / 退市整理股票不可交易，直接从截面剔除
+    st_mask = stocks["name"].fillna("").str.contains(r"ST|退", regex=True)
+    st_codes = set(stocks.loc[st_mask, "code"])
+    price = price[~price["code"].isin(st_codes)].copy()
     fin = _load_fin(db, as_of)
     if not fin.empty:
         price = price.merge(
@@ -226,7 +233,9 @@ def build_features(db: Session, as_of: date | None = None) -> dict:
 
     # 质量门禁：覆盖率与关键字段填充率
     eligible = db.execute(text(
-        "SELECT count(*) FROM stocks WHERE code LIKE '60%' OR code LIKE '00%'"
+        "SELECT count(*) FROM stocks WHERE (code LIKE '60%' OR code LIKE '00%')"
+        " AND coalesce(name,'') NOT LIKE '%ST%'"
+        " AND coalesce(name,'') NOT LIKE '%退%'"
     )).scalar() or 0
     coverage = round(float(len(price)) / eligible * 100, 2) if eligible else None
     quality.record(db, "feat_stock_daily", as_of, "coverage_pct", coverage,
