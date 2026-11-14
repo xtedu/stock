@@ -23,9 +23,19 @@ def get_feasibility(window: int = Query(20, ge=1, le=120),
 @router.get("/composite")
 def get_composite(window: int = Query(20, ge=1, le=120),
                   days: int = Query(200, ge=20, le=500),
+                  veto: bool = Query(False),
                   db: Session = Depends(get_db)):
     """等权合成分（低波动 + 低位置 + 低 PB + 反转）的十分位单调性。"""
-    return feasibility.run_composite(db, window=window, days=days)
+    return feasibility.run_composite(db, window=window, days=days, veto=veto)
+
+
+@router.get("/avoid-list")
+def get_avoid_list(as_of: date | None = None,
+                   pct: float = Query(0.2, gt=0, le=0.5),
+                   limit: int = Query(100, ge=1, le=500),
+                   db: Session = Depends(get_db)):
+    """风险剔除清单：合成分最低分位的个股（仅供规避，不作为买入信号）。"""
+    return feasibility.run_avoid_list(db, as_of=as_of, pct=pct, limit=limit)
 
 
 @router.get("/coverage")
