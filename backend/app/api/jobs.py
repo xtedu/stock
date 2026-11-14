@@ -133,6 +133,14 @@ def sync_money_flow(intraday: bool = False, db: Session = Depends(get_db)):
                                        intraday=intraday))
 
 
+@router.post("/money-flow-backfill")
+def backfill_money_flow(days: int = 120):
+    """回补全市场资金流历史（东财单只约 120 个交易日，逐只拉取）。"""
+    return _run_async("money_flow_backfill",
+                      lambda: _with_db(money_flow.backfill_money_flow,
+                                       days=days))
+
+
 @router.post("/monitor")
 def monitor_now(db: Session = Depends(get_db)):
     return monitor.check_and_notify(db)
